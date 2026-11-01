@@ -43,7 +43,35 @@ python main.py -h                                 # all options
 ```
 main.py         # corpus, the three RAG classes, and the CLI
 pyproject.toml  # packaging, dependencies, ruff config
+.env.example    # template for local settings (copy to .env)
+.vscode/        # shared editor settings (loads .env into the integrated terminal)
+LICENSE         # MIT
 ```
+
+## Branches
+
+| Branch | Purpose                                  |
+| ------ | ---------------------------------------- |
+| `main` | Stable baseline                          |
+| `Dev`  | Active development                       |
+| `UAT`  | User acceptance testing before `main`    |
+
+`Dev` and `UAT` currently exist locally only; push them with `git push -u origin Dev UAT`.
+
+## Status
+
+Working prototype on a five-document toy corpus. Not yet verified end to end in a
+clean environment after the latest refactors (method reordering, `.env` config).
+
+Known gaps:
+
+- **No tests or CI.** The ACL filter, graph hops, RRF fusion and both IDF functions are the first candidates.
+- **Provider selection.** The CLI has no `--provider` flag; the provider comes from `PROVIDER` in `main.py`, and the `use_llm` default differs for `OllamaGraphRAG` (off) versus the other two (on).
+- **Permission leaks in the audit trace.** It lists IDs of documents the user may not see, and IDF statistics include restricted documents.
+- **Weak citation check.** It verifies that cited IDs exist in the context, not that claims are supported, and its regex ignores IDs containing `-` or `.`.
+- **`GraphRAG` requires `edges`.** Passing `None` raises an error.
+- **Performance.** TF-IDF vectors are rebuilt per query and the graph walk has no context cap.
+- **No retrieval evaluation** (e.g. recall@k) to compare the three models.
 
 ## License
 
