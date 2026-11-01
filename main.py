@@ -213,11 +213,6 @@ class TraditionalRAG:
             for w, count in df.items()
         }
 
-    def _build_index(self):
-        """Tokenize documents and compute TF-IDF IDF weights only."""
-        self.tokens = {d: self.tokenize(v["text"]) for d, v in self.docs.items()}
-        self.tfidf_idf = self.build_tfidf_idf(self.tokens)
-
     @staticmethod
     def vec(t, vocab, idf):
         r"""
@@ -282,6 +277,13 @@ class TraditionalRAG:
         counts = Counter(t)
         return [counts[w] * idf[w] for w in vocab]
 
+    def _build_index(self):
+        """Tokenize documents, compute TF-IDF IDF weights, and precompute document vectors."""
+        self.tokens = {d: self.tokenize(v["text"]) for d, v in self.docs.items()}
+        self.tfidf_idf = self.build_tfidf_idf(self.tokens)
+        self.vocab = list(self.tfidf_idf)
+        self.doc_vectors = {d: self.vec(t, self.vocab, self.tfidf_idf) for d, t in self.tokens.items()}
+
     @staticmethod
     def cosine(a, b):
         r"""
@@ -330,12 +332,12 @@ class TraditionalRAG:
 
         return dot / (norm_a * norm_b)
 
-    def tfidf_scores(self, q_tokens, doc_ids, tokens, idf):
+    def tfidf_scores(self, q_tokens, doc_ids, doc_vectors, vocab, idf):
         r"""
         Rank documents using TF-IDF weighted cosine similarity.
 
-        Converts a search query and each document into numeric vectors
-        using vec(), then compares them using cosine().
+        Converts the search query into a numeric vector using vec(), then
+        compares it with each precomputed document vector using cosine().
 
         Parameters
         ----------
@@ -347,18 +349,20 @@ class TraditionalRAG:
             Document IDs to evaluate.
             Example: [1, 2, 3]
 
-        tokens : dict
-            Dictionary mapping document IDs to their token lists.
+        doc_vectors : dict
+            Document ID -> TF-IDF vector, precomputed in _build_index().
             Example:
                 {
-                    1: ["bank", "deposit", "rates"],
-                    2: ["bank", "loan", "rates"],
-                    3: ["python", "programming"]
+                    1: [0.4, 1.5, 0.0],
+                    2: [0.4, 0.0, 1.0]
                 }
+
+        vocab : list of str
+            Shared vocabulary defining the order of vector dimensions.
+            Must be the same vocabulary used to build doc_vectors.
 
         idf : dict
             Word importance scores produced by build_tfidf_idf().
-            Also defines the shared vocabulary.
 
         Returns
         -------
@@ -378,11 +382,10 @@ class TraditionalRAG:
         Notes
         -----
         How it works:
-            1. Extract the shared vocabulary from the IDF dictionary.
-            2. Convert the query into a TF-IDF vector using vec().
-            3. Convert each document into a TF-IDF vector using vec().
-            4. Compare the query and document vectors using cosine().
-            5. Return similarity scores indexed by document ID.
+            1. Convert the query into a TF-IDF vector using vec().
+            2. Look up each document's precomputed vector in doc_vectors.
+            3. Compare the query and document vectors using cosine().
+            4. Return similarity scores indexed by document ID.
 
         .. math::
 
@@ -408,14 +411,14 @@ class TraditionalRAG:
         ...     2: ["bank", "loan"]
         ... }
         >>> idf = build_tfidf_idf(tokens)
-        >>> tfidf_scores(["bank", "deposit"], [1, 2], tokens, idf)
+        >>> vocab = list(idf)
+        >>> doc_vectors = {d: vec(t, vocab, idf) for d, t in tokens.items()}
+        >>> tfidf_scores(["bank", "deposit"], [1, 2], doc_vectors, vocab, idf)
         {1: 1.0, 2: 0.1683...}
         """
-        vocab = list(idf)
-
         q = self.vec(q_tokens, vocab, idf)
 
-        return {d: self.cosine(q, self.vec(tokens[d], vocab, idf)) for d in doc_ids}
+        return {d: self.cosine(q, doc_vectors[d]) for d in doc_ids}
 
     def _dense(self, doc_ids):
         """Score candidate docs with TF-IDF cosine similarity.
@@ -435,7 +438,7 @@ class TraditionalRAG:
         Called by BOTH TraditionalRAG.predict() and GraphRAG.predict().
         OllamaGraphRAG overrides this method with real embeddings.
         """
-        score = self.tfidf_scores(self.q_tokens, doc_ids, self.tokens, self.tfidf_idf)
+        score = self.tfidf_scores(self.q_tokens, doc_ids, self.doc_vectors, self.vocab, self.tfidf_idf)
         return score
 
     @staticmethod
@@ -723,8 +726,11 @@ class GraphRAG(TraditionalRAG):
         self._build_graph()
 
     def _build_index(self):
-        """Build inherited TF-IDF index and GraphRAG-specific BM25 IDF."""
-        super()._build_index()
+        """Tokenize documents, compute TF-IDF IDF weights and document vectors, then BM25 IDF."""
+        self.tokens = {d: self.tokenize(v["text"]) for d, v in self.docs.items()}
+        self.tfidf_idf = self.build_tfidf_idf(self.tokens)
+        self.vocab = list(self.tfidf_idf)
+        self.doc_vectors = {d: self.vec(t, self.vocab, self.tfidf_idf) for d, t in self.tokens.items()}
         self.bm25_idf = self.build_bm25_idf(self.tokens)
 
     def _build_avg_len(self):

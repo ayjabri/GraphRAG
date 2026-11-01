@@ -11,22 +11,26 @@ corpus of services and tables, implemented as three classes in [main.py](main.py
 
 ## How `TraditionalRAG` works
 
-From construction to answer. The dotted path is the optional LLM route, taken only when `use_llm=True`;
-otherwise the retrieved evidence is returned as the answer.
+From construction to answer. Each box inside `fit` and `predict` is one line of that method,
+labelled with the attribute it sets. Nested boxes are the steps inside a called function.
+The dotted path is the optional LLM route, taken only when `use_llm=True`; otherwise the
+retrieved evidence is returned as the answer.
 
 ```mermaid
 flowchart TD
     subgraph INIT["Initiation (once)"]
-        A(["TraditionalRAG(docs, top_k, use_llm, provider)"]) --> LAUNCH_IN
+        direction TB
+        A(["TraditionalRAG(docs, top_k, use_llm, provider)"]) --> I1["__init__<br/>store docs, top_k, use_llm, provider"]
+        I1 --> LAUNCH_IN
 
         subgraph LAUNCH["__launch__"]
             direction TB
             LAUNCH_IN[" "]:::hidden
-            LLMB["get_llm(provider)<br/>stored as self._llm"]
+            LLMB["get_llm(provider)<br/>-> self._llm"]
 
             subgraph BUILD["_build_index"]
                 direction TB
-                T1["tokenize each document"] --> T2["build_tfidf_idf<br/>IDF weight per word"]
+                T1["tokenize each document<br/>-> self.tokens"] --> T2["build_tfidf_idf<br/>-> self.tfidf_idf"]
             end
 
             LAUNCH_IN -.->|"use_llm only"| LLMB
@@ -36,35 +40,31 @@ flowchart TD
 
     subgraph QUERY["Query: fit_predict(query)"]
         direction TB
-        G(["query"]) --> F1
+        Q(["query"]) --> F1
 
         subgraph FIT["fit"]
             direction TB
-            F1["store query"] --> F2["tokenize query"]
+            F1["store query<br/>-> self.query"] --> F2["tokenize<br/>-> self.q_tokens"]
 
-            subgraph RD["dense ranking: _rank(_dense(all docs))"]
+            subgraph DENSE["_dense(all docs) -> self.dense_scores"]
                 direction TB
-                subgraph DENSE["_dense"]
+                subgraph TS["tfidf_scores"]
                     direction TB
-                    subgraph TS["tfidf_scores"]
-                        direction TB
-                        D1["vec: query vector"] --> D2["vec: document vector"] --> D3["cosine: query vs document"]
-                    end
+                    D1["vec: query vector"] --> D2["vec: document vector"] --> D3["cosine: query vs document"]
                 end
-                D3 --> R1["_rank<br/>sort by score, drop scores <= 0"]
             end
 
-            F2 --> D1
-        end
+            F3["_rank(self.dense_scores)<br/>sort, drop scores <= 0<br/>-> self.dense"]
 
-        R1 --> R2
+            F2 --> D1
+            D3 --> F3
+        end
 
         subgraph PREDICT["predict"]
             direction TB
-            R2["_select_top_k<br/>keep top_k document IDs"] --> R3["_get_evidence<br/>pair each ID with its text"]
-            R3 --> A0
+            P1["_select_top_k<br/>-> self.top"] --> P2["_get_evidence<br/>-> self.evidence"]
 
-            subgraph ANSWER["_answer"]
+            subgraph ANSWER["_answer -> answer"]
                 direction TB
                 A0{"use_llm?"}
                 A1["join evidence text with [doc_id]"]
@@ -78,14 +78,18 @@ flowchart TD
                 A0 -.->|"yes"| L1
             end
 
-            A1 --> P1["answer, verdict, provenance, trace"]
-            L2 -.-> P1
+            P3["result: answer, verdict 'not checked', provenance, trace"]
+
+            P2 --> A0
+            A1 --> P3
+            L2 -.-> P3
         end
 
-        P1 --> S1["show: print result"]
+        F3 --> P1
+        P3 --> S1["show: print result"]
     end
 
-    T2 --> G
+    T2 --> Q
     LLMB -.-> L2
 
     classDef hidden fill:none,stroke:none,color:none,width:0px,height:0px;
@@ -93,32 +97,36 @@ flowchart TD
 
 ## How `GraphRAG` works
 
-`GraphRAG` extends `TraditionalRAG`: it adds BM25 statistics and the graph at initiation, then
-an ACL filter, BM25 ranking (`lex`) and similarity ranking (`dense`) in `fit`, then rank fusion,
-a graph walk and a citation check in `predict`. In `GraphRAG` both rankings are keyword-based
-(BM25 versus TF-IDF cosine); only `EmbeddingGraphRAG` makes `dense` semantic.
-The dotted path is the optional LLM route, taken only when `use_llm=True`.
-`EmbeddingGraphRAG` is identical except that `_dense` uses Ollama embeddings instead of TF-IDF.
+`GraphRAG` extends `TraditionalRAG`. At initiation it adds BM25 statistics and the graph. In `fit`
+it adds an ACL filter and a second ranking: `dense` (TF-IDF cosine) and `lex` (BM25), both over the
+allowed documents only. In `predict` it fuses the two rankings, walks the graph and checks citations.
+In `GraphRAG` both rankings are keyword-based; only `EmbeddingGraphRAG` makes `dense` semantic.
+`EmbeddingGraphRAG` follows exactly this flow, except that `_dense` calls Ollama embeddings
+instead of `tfidf_scores`. The dotted path is the optional LLM route, taken only when `use_llm=True`.
 
 ```mermaid
 flowchart TD
     subgraph INIT["Initiation (once)"]
-        A(["GraphRAG(docs, edges, groups, top_k, hops, rrf_k, use_llm, provider)"]) --> I0["store edges, groups, hops, rrf_k"]
-        I0 --> LAUNCH_IN
+        direction TB
+        A(["GraphRAG(docs, edges, groups, top_k, hops, rrf_k, use_llm, provider)"]) --> I0["__init__<br/>store edges, groups, hops, rrf_k"]
+        I0 --> I1["TraditionalRAG.__init__<br/>store docs, top_k, use_llm, provider"]
+        I1 --> LAUNCH_IN
 
-        subgraph LAUNCH["__launch__"]
+        subgraph LAUNCH["__launch__ (GraphRAG's own)"]
             direction TB
             LAUNCH_IN[" "]:::hidden
-            LLMB["get_llm(provider)<br/>stored as self._llm"]
+            LLMB["get_llm(provider)<br/>-> self._llm"]
 
             subgraph BUILD["_build_index"]
                 direction TB
-                T1["tokenize each document"] --> T2["build_tfidf_idf<br/>IDF weight per word"] --> T3["build_bm25_idf<br/>BM25 IDF weight per word"]
+                T1["tokenize each document<br/>-> self.tokens"] --> T2["build_tfidf_idf<br/>-> self.tfidf_idf"]
+                T2 --> TV["list of IDF words<br/>-> self.vocab"] --> TD["vec for each document<br/>-> self.doc_vectors"]
+                TD --> T3["build_bm25_idf<br/>-> self.bm25_idf"]
             end
 
-            AVG["_build_avg_len<br/>average document length"]
+            AVG["_build_avg_len<br/>-> self.avg_len"]
 
-            subgraph GRAPH["_build_graph"]
+            subgraph GRAPH["_build_graph -> self.adj"]
                 direction TB
                 G1["validate edge endpoints exist"] --> G2["add forward edge and reverse edge ~"]
             end
@@ -135,38 +143,28 @@ flowchart TD
 
         subgraph FIT["fit"]
             direction TB
+            F1["store query<br/>-> self.query"] --> F2["tokenize<br/>-> self.q_tokens"] --> F3["start audit trace<br/>-> self.trace"]
 
-            F1["store query"] --> F2["tokenize query"]
-            F3["start audit trace"]
-
-            subgraph ACL["_filter_acl"]
+            subgraph ACL["_filter_acl -> self.allowed, self.trace"]
                 direction TB
                 C1["_allowed: user groups intersect document ACL"] --> C2["keep allowed docs, log counts in trace"]
             end
 
-            subgraph BM["lexical ranking: _rank(_bm25(allowed))"]
-                direction TB
-                B1["_bm25: score allowed docs"] --> B2["_rank: sort, drop scores <= 0"]
-            end
+            F4["_dense(self.allowed)<br/>TF-IDF cosine (embeddings in EmbeddingGraphRAG)<br/>-> self.dense_scores"]
+            F5["_rank(self.dense_scores)<br/>-> self.dense"]
+            F6["_bm25(self.allowed)<br/>-> self.lex_scores"]
+            F7["_rank(self.lex_scores)<br/>-> self.lex"]
 
-            subgraph DR["dense ranking: _rank(_dense(allowed))"]
-                direction TB
-                D1["_dense on allowed docs<br/>TF-IDF cosine (embeddings in EmbeddingGraphRAG)"] --> D2["_rank: sort, drop scores <= 0"]
-            end
-
-            F2 --> F3 --> C1
-            C2 --> B1
-            B2 --> D1
+            F3 --> C1
+            C2 --> F4 --> F5 --> F6 --> F7
         end
 
         subgraph PREDICT["predict"]
             direction TB
+            R1["Reciprocal Rank Fusion of self.lex + self.dense<br/>score = sum of 1 / (rrf_k + position + 1)"]
+            R2["seeds = top_k fused docs"]
 
-            R2["Reciprocal Rank Fusion of self.lex + self.dense<br/>score = sum of 1 / rrf_k + position + 1"]
-
-            R3["seeds = top_k fused docs"]
-
-            subgraph WALK["Graph walk, up to hops steps"]
+            subgraph WALK["Graph walk, up to hops steps -> context"]
                 direction TB
                 W1["for each frontier node, follow edges"] --> W2{"neighbor already in context?"}
                 W2 -->|"no"| W3{"_allowed(neighbor)?"}
@@ -175,9 +173,9 @@ flowchart TD
                 W3 -->|"no"| W6["drop, log in trace"]
             end
 
-            R4["evidence = all context documents"]
+            R3["evidence = text of every context document<br/>-> self.evidence"]
 
-            subgraph ANSWER["_answer"]
+            subgraph ANSWER["_answer -> answer"]
                 direction TB
                 A0{"use_llm?"}
                 A1["join evidence text with [doc_id]"]
@@ -191,25 +189,27 @@ flowchart TD
                 A0 -.->|"yes"| L1
             end
 
-            subgraph CITE["Citation check"]
+            subgraph CITE["Citation check -> verdict"]
                 direction TB
                 K1["extract cited [doc_id] from answer"] --> K2{"cited and all in context?"}
-                K2 -->|"yes"| K3["verdict: grounded"]
-                K2 -->|"no"| K4["verdict: UNGROUNDED"]
+                K2 -->|"yes"| K3["grounded"]
+                K2 -->|"no"| K4["UNGROUNDED"]
             end
 
-            R2 --> R3 --> W1
-            W4 --> R4
-            W5 --> R4
-            W6 --> R4
-            R4 --> A0
+            P1["result: answer, verdict, provenance, trace"]
+
+            R1 --> R2 --> W1
+            W4 --> R3
+            W5 --> R3
+            W6 --> R3
+            R3 --> A0
             A1 --> K1
             L2 -.-> K1
-            K3 --> P1["result: answer, verdict, provenance, trace"]
+            K3 --> P1
             K4 --> P1
         end
 
-        D2 --> R2
+        F7 --> R1
         P1 --> S1["show: print result"]
     end
 
