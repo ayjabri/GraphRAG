@@ -1,0 +1,27 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "graphrag"
+version = "0.1.0"
+description = "Traditional RAG vs Graph RAG: a small, permission-aware comparison with Ollama or Anthropic backends."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+dependencies = [
+    "langchain>=0.3",
+    "langchain-core>=0.3",
+]
+
+[project.optional-dependencies]
+ollama = ["langchain-ollama"]
+anthropic = ["langchain-anthropic"]
+dev = ["ruff", "pytest"]
+
+[tool.setuptools]
+py-modules = ["main"]
+
+[tool.ruff]
+line-length = 120
+target-version = "py310"
