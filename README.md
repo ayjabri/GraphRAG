@@ -9,6 +9,40 @@ corpus of services and tables, implemented as three classes in [main.py](main.py
 | `GraphRAG`       | ACL filter, BM25 + TF-IDF fused with RRF, graph walk, citation check.            |
 | `OllamaGraphRAG` | `GraphRAG`, but the dense retrieval step uses an Ollama embedding model.         |
 
+## How `TraditionalRAG` works
+
+From construction to answer. The dotted path is the optional LLM route, taken only when `use_llm=True`;
+otherwise the retrieved evidence is returned as the answer.
+
+```mermaid
+flowchart TD
+    subgraph INIT["Initiation: __init__ -> __launch__ (once)"]
+        A([TraditionalRAG docs, top_k, use_llm, provider]) --> B["__launch__"]
+        B -.->|"use_llm only"| C["get_llm(provider)<br/>store as self._llm"]
+        B --> D["_build_index"]
+        D --> E["tokenize each document"]
+        E --> F["build_tfidf_idf<br/>IDF weight per word"]
+    end
+
+    subgraph QUERY["Query: fit_predict(query)"]
+        G([query]) --> H["fit: store query"]
+        H --> I["_tokenize_query"]
+        I --> J["predict"]
+        J --> K["_dense: tfidf_scores<br/>vec + cosine per document"]
+        K --> L["rank: sort by score, drop scores <= 0"]
+        L --> M["keep top_k as evidence"]
+        M --> N["_answer"]
+        N -->|"use_llm = False"| O["join evidence text with [doc_id]"]
+        N -.->|"use_llm = True"| P["llm_answer<br/>prompt + self._llm.invoke"]
+        O --> Q["result: answer, verdict, provenance, trace"]
+        P -.-> Q
+        Q --> R["show: print result"]
+    end
+
+    F --> G
+    C -.-> P
+```
+
 ## Setup
 
 Requires Python 3.10+.
@@ -33,7 +67,7 @@ Copy `.env.example` to `.env` and fill in your settings (`.env` is gitignored):
 ```bash
 python main.py                                    # GraphRAG as user group 'sre'
 python main.py --model traditional                # TraditionalRAG
-python main.py --model ollama --embed-model nomic-embed-text --host http://localhost:11434
+python main.py --model ollama                     # host and embed model come from .env
 python main.py --model graph --groups sre finance --query "your question"
 python main.py -h                                 # all options
 ```
