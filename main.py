@@ -7,7 +7,7 @@
 Run:
   python lesson01_graph_rag.py                                   # GraphRAG as user group 'sre'
   python lesson01_graph_rag.py --model traditional               # TraditionalRAG
-  python lesson01_graph_rag.py --model ollama --embed-model <name> --host http://10.0.0.100:11434
+  python lesson01_graph_rag.py --model ollama --embed-model <name> --host http://localhost:11434
   python lesson01_graph_rag.py --model graph --groups sre finance --query "your question"
   python lesson01_graph_rag.py -h                                # all options
 """
@@ -21,8 +21,8 @@ import os
 import re
 import urllib.request
 from collections import Counter, defaultdict
-from pathlib import Path
 
+from dotenv import load_dotenv
 from warnings import filterwarnings
 
 filterwarnings("ignore")
@@ -33,10 +33,9 @@ PROVIDER = "ollama"  # "ollama" or "anthropic"
 LLM_MODELS = {"ollama": "qwen3.6:27b", "anthropic": "claude-haiku-5-5"}
 
 
-os.environ["ANTHROPIC_API_KEY"] = Path("key.txt").read_text().strip() if Path("key.txt").exists() else ""
-os.environ["ANTHROPIC_MODEL"] = "claude-haiku-5-5"
+load_dotenv()  # ANTHROPIC_API_KEY, OLLAMA_BASE_URL, OLLAMA_EMBED_MODEL from .env
 
-# MODEL = os.environ.get("ANTHROPIC_MODEL", "claude-sonnet-5")
+OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
 
 # ---------------------------------------------------------------- toy corpus
 DOCS = {
@@ -123,75 +122,7 @@ class TraditionalRAG:
         exists before fit() is called.
         """
         self._build_index()
-
-    def _build_index(self):
-        """Tokenize documents and compute TF-IDF IDF weights only."""
-        self.tokens = {d: self.tokenize(v["text"]) for d, v in self.docs.items()}
-        self.tfidf_idf = self.build_tfidf_idf(self.tokens)
-
-    def _dense(self, doc_ids):
-        """Score candidate docs with TF-IDF cosine similarity.
-
-        Parameters
-        ----------
-        doc_ids : iterable
-            Document IDs to compare with the current query.
-
-        Returns
-        -------
-        dict
-            Document ID -> similarity score.
-
-        Notes
-        -----
-        Called by BOTH TraditionalRAG.predict() and GraphRAG.predict().
-        OllamaGraphRAG overrides this method with real embeddings.
-        """
-        score = self.tfidf_scores(self.q_tokens, doc_ids, self.tokens, self.tfidf_idf)
-        return score 
-
-    def fit(self, query):
-        """Store the query, run every preparation step in order; return self."""
-        self.query = query
-        self._tokenize_query()
-        return self
-
-    def _tokenize_query(self):
-        """Tokenize the stored query."""
-        self.q_tokens = self.tokenize(self.query)
-
-    def _answer(self, evidence):
-        """Generate an LLM answer, or return raw evidence when disabled."""
-        if self.use_llm:
-            return self.llm_answer(self.query, evidence, self.llm)
-        return " ".join(f"{text} [{doc_id}]" for doc_id, text in evidence)
-
-    def predict(self):
-        """Rank all documents by TF-IDF similarity and return top-k.
-
-        Returns
-        -------
-        dict
-            answer, verdict (not checked), provenance and audit trace.
-        """
-        scores = self._dense(list(self.docs))
-        top = self.rank(scores)[:self.top_k]
-        self.evidence = [(d, self.docs[d]["text"]) for d in top]
-        return {
-            "answer": self._answer(self.evidence),
-            "verdict": "not checked",
-            "provenance": {d: f"top-{self.top_k} by similarity" for d in top},
-            "trace": [
-                f"TF-IDF cosine search over {len(self.docs)} docs; "
-                "no ACL filter, no BM25, no graph walk"
-            ],
-        }
-
-    def fit_predict(self, query):
-        """Fit a query, predict, display the result, and return it."""
-        result = self.fit(query).predict()
-        self.show(query, type(self).__name__, result)
-        return result
+        
 
     def tokenize(self, text):
         """
@@ -247,47 +178,6 @@ class TraditionalRAG:
         """
         return re.findall(r"\w+", text.lower())
 
-    def cosine(self, a, b):
-        """
-        Calculate cosine similarity between two equal-length numeric vectors.
-
-        Parameters
-        ----------
-        a, b : list or array
-            Numeric vectors with the same number of dimensions.
-
-        Returns
-        -------
-        float
-            Cosine similarity between -1 and 1.
-            Returns 0.0 if either vector has zero magnitude.
-
-        Raises
-        ------
-        ValueError
-            If the vectors have different lengths.
-
-        Notes
-        -----
-        Formula:
-            cosine = dot(a, b) / (||a|| * ||b||)
-
-        A score of:
-             1.0 : Same direction.
-             0.0 : Orthogonal vectors or zero magnitude.
-            -1.0 : Opposite directions.
-        """
-        if len(a) != len(b):
-            raise ValueError(f"Vector dimensions must match: {len(a)} != {len(b)}")
-
-        dot = sum(x * y for x, y in zip(a, b))
-        norm_a = math.sqrt(sum(x * x for x in a))
-        norm_b = math.sqrt(sum(y * y for y in b))
-
-        if norm_a == 0 or norm_b == 0:
-            return 0.0
-
-        return dot / (norm_a * norm_b)
 
     def build_tfidf_idf(self, tokens):
         """
@@ -318,6 +208,11 @@ class TraditionalRAG:
             w: math.log((n + 1) / (count + 1)) + 1
             for w, count in df.items()
         }
+    
+    def _build_index(self):
+        """Tokenize documents and compute TF-IDF IDF weights only."""
+        self.tokens = {d: self.tokenize(v["text"]) for d, v in self.docs.items()}
+        self.tfidf_idf = self.build_tfidf_idf(self.tokens)
 
     def vec(self, t, vocab, idf):
         """
@@ -377,87 +272,6 @@ class TraditionalRAG:
         """
         counts = Counter(t)
         return [counts[w] * idf[w] for w in vocab]
-
-    def tfidf_scores(self, q_tokens, doc_ids, tokens, idf):
-        """
-        Rank documents using TF-IDF weighted cosine similarity.
-
-        Converts a search query and each document into numeric vectors
-        using vec(), then compares them using cosine().
-
-        Parameters
-        ----------
-        q_tokens : list of str
-            Tokenized search query.
-            Example: ["bank", "deposit"]
-
-        doc_ids : list
-            Document IDs to evaluate.
-            Example: [1, 2, 3]
-
-        tokens : dict
-            Dictionary mapping document IDs to their token lists.
-            Example:
-                {
-                    1: ["bank", "deposit", "rates"],
-                    2: ["bank", "loan", "rates"],
-                    3: ["python", "programming"]
-                }
-
-        idf : dict
-            Word importance scores produced by build_tfidf_idf().
-            Also defines the shared vocabulary.
-
-        Returns
-        -------
-        dict
-            Dictionary mapping document IDs to cosine similarity scores.
-
-            Example:
-                {
-                    1: 0.95,
-                    2: 0.30,
-                    3: 0.00
-                }
-
-            Values range from 0 to 1 when IDF weights are nonnegative.
-            Higher scores indicate stronger keyword similarity.
-
-        Notes
-        -----
-        How it works:
-            1. Extract the shared vocabulary from the IDF dictionary.
-            2. Convert the query into a TF-IDF vector using vec().
-            3. Convert each document into a TF-IDF vector using vec().
-            4. Compare the query and document vectors using cosine().
-            5. Return similarity scores indexed by document ID.
-
-        Formula:
-            similarity(q, d) = dot(q, d) / (||q|| * ||d||)
-
-        Important
-        ---------
-        - Measures keyword similarity, not semantic meaning.
-        - Uses the same vocabulary for every vector.
-        - Assumes cosine() handles zero-magnitude vectors.
-        - Uses smoothed TF-IDF weights from build_tfidf_idf().
-        - Dense vectors may be inefficient for large vocabularies.
-
-        Examples
-        --------
-        >>> tokens = {
-        ...     1: ["bank", "deposit"],
-        ...     2: ["bank", "loan"]
-        ... }
-        >>> idf = build_tfidf_idf(tokens)
-        >>> tfidf_scores(["bank", "deposit"], [1, 2], tokens, idf)
-        {1: 1.0, 2: 0.1683...}
-        """
-        vocab = list(idf)
-
-        q = self.vec(q_tokens, vocab, idf)
-
-        return {d: self.cosine(q, self.vec(tokens[d], vocab, idf)) for d in doc_ids}
 
     def rank(self, scores):
         """
@@ -546,7 +360,7 @@ class TraditionalRAG:
         }
 
         if provider == "ollama":
-            kwargs["base_url"] = os.getenv("OLLAMA_BASE_URL", "http://10.0.0.100:11434")
+            kwargs["base_url"] = OLLAMA_BASE_URL
             kwargs["reasoning"] = False
 
         return init_chat_model(**kwargs)
@@ -601,6 +415,198 @@ class TraditionalRAG:
         response = llm.invoke(messages)
 
         return response.text()
+
+
+    def cosine(self, a, b):
+        """
+        Calculate cosine similarity between two equal-length numeric vectors.
+
+        Parameters
+        ----------
+        a, b : list or array
+            Numeric vectors with the same number of dimensions.
+
+        Returns
+        -------
+        float
+            Cosine similarity between -1 and 1.
+            Returns 0.0 if either vector has zero magnitude.
+
+        Raises
+        ------
+        ValueError
+            If the vectors have different lengths.
+
+        Notes
+        -----
+        Formula:
+            cosine = dot(a, b) / (||a|| * ||b||)
+
+        A score of:
+             1.0 : Same direction.
+             0.0 : Orthogonal vectors or zero magnitude.
+            -1.0 : Opposite directions.
+        """
+        if len(a) != len(b):
+            raise ValueError(f"Vector dimensions must match: {len(a)} != {len(b)}")
+
+        dot = sum(x * y for x, y in zip(a, b))
+        norm_a = math.sqrt(sum(x * x for x in a))
+        norm_b = math.sqrt(sum(y * y for y in b))
+
+        if norm_a == 0 or norm_b == 0:
+            return 0.0
+
+        return dot / (norm_a * norm_b)
+
+    def tfidf_scores(self, q_tokens, doc_ids, tokens, idf):
+        """
+        Rank documents using TF-IDF weighted cosine similarity.
+
+        Converts a search query and each document into numeric vectors
+        using vec(), then compares them using cosine().
+
+        Parameters
+        ----------
+        q_tokens : list of str
+            Tokenized search query.
+            Example: ["bank", "deposit"]
+
+        doc_ids : list
+            Document IDs to evaluate.
+            Example: [1, 2, 3]
+
+        tokens : dict
+            Dictionary mapping document IDs to their token lists.
+            Example:
+                {
+                    1: ["bank", "deposit", "rates"],
+                    2: ["bank", "loan", "rates"],
+                    3: ["python", "programming"]
+                }
+
+        idf : dict
+            Word importance scores produced by build_tfidf_idf().
+            Also defines the shared vocabulary.
+
+        Returns
+        -------
+        dict
+            Dictionary mapping document IDs to cosine similarity scores.
+
+            Example:
+                {
+                    1: 0.95,
+                    2: 0.30,
+                    3: 0.00
+                }
+
+            Values range from 0 to 1 when IDF weights are nonnegative.
+            Higher scores indicate stronger keyword similarity.
+
+        Notes
+        -----
+        How it works:
+            1. Extract the shared vocabulary from the IDF dictionary.
+            2. Convert the query into a TF-IDF vector using vec().
+            3. Convert each document into a TF-IDF vector using vec().
+            4. Compare the query and document vectors using cosine().
+            5. Return similarity scores indexed by document ID.
+
+        Formula:
+            similarity(q, d) = dot(q, d) / (||q|| * ||d||)
+
+        Important
+        ---------
+        - Measures keyword similarity, not semantic meaning.
+        - Uses the same vocabulary for every vector.
+        - Assumes cosine() handles zero-magnitude vectors.
+        - Uses smoothed TF-IDF weights from build_tfidf_idf().
+        - Dense vectors may be inefficient for large vocabularies.
+
+        Examples
+        --------
+        >>> tokens = {
+        ...     1: ["bank", "deposit"],
+        ...     2: ["bank", "loan"]
+        ... }
+        >>> idf = build_tfidf_idf(tokens)
+        >>> tfidf_scores(["bank", "deposit"], [1, 2], tokens, idf)
+        {1: 1.0, 2: 0.1683...}
+        """
+        vocab = list(idf)
+
+        q = self.vec(q_tokens, vocab, idf)
+
+        return {d: self.cosine(q, self.vec(tokens[d], vocab, idf)) for d in doc_ids}
+
+
+
+    def _dense(self, doc_ids):
+        """Score candidate docs with TF-IDF cosine similarity.
+
+        Parameters
+        ----------
+        doc_ids : iterable
+            Document IDs to compare with the current query.
+
+        Returns
+        -------
+        dict
+            Document ID -> similarity score.
+
+        Notes
+        -----
+        Called by BOTH TraditionalRAG.predict() and GraphRAG.predict().
+        OllamaGraphRAG overrides this method with real embeddings.
+        """
+        score = self.tfidf_scores(self.q_tokens, doc_ids, self.tokens, self.tfidf_idf)
+        return score 
+
+    def _tokenize_query(self):
+        """Tokenize the stored query."""
+        self.q_tokens = self.tokenize(self.query)
+
+    def _answer(self, evidence):
+        """Generate an LLM answer, or return raw evidence when disabled."""
+        if self.use_llm:
+            return self.llm_answer(self.query, evidence, self.llm)
+        return " ".join(f"{text} [{doc_id}]" for doc_id, text in evidence)
+
+
+    def fit(self, query):
+        """Store the query, run every preparation step in order; return self."""
+        self.query = query
+        self._tokenize_query()
+        return self
+
+    def predict(self):
+        """Rank all documents by TF-IDF similarity and return top-k.
+
+        Returns
+        -------
+        dict
+            answer, verdict (not checked), provenance and audit trace.
+        """
+        scores = self._dense(list(self.docs))
+        top = self.rank(scores)[:self.top_k]
+        self.evidence = [(d, self.docs[d]["text"]) for d in top]
+        return {
+            "answer": self._answer(self.evidence),
+            "verdict": "not checked",
+            "provenance": {d: f"top-{self.top_k} by similarity" for d in top},
+            "trace": [
+                f"TF-IDF cosine search over {len(self.docs)} docs; "
+                "no ACL filter, no BM25, no graph walk"
+            ],
+        }
+
+    def fit_predict(self, query):
+        """Fit a query, predict, display the result, and return it."""
+        result = self.fit(query).predict()
+        self.show(query, type(self).__name__, result)
+        return result
+
 
     def show(self, query, label, result):
         print(f"Q: {query}   [{label}]\n")
@@ -872,7 +878,7 @@ class OllamaGraphRAG(GraphRAG):
     """
 
     def __init__(self, docs, edges, groups, top_k=3, hops=2, rrf_k=60,
-                 use_llm=False, ollama_host="http://10.0.0.100:11434",
+                 use_llm=False, ollama_host=OLLAMA_BASE_URL,
                  embed_model=None, provider="ollama"):
         self.ollama_host = ollama_host.rstrip("/")
         self.embed_model = embed_model or os.getenv("OLLAMA_EMBED_MODEL", "nomic-embed-text")
@@ -921,7 +927,7 @@ def parse_args(argv=None):
     )
     p.add_argument("-g", "--groups", nargs="+", default=["sre"], help="user's groups (default: sre)")
     p.add_argument("-q", "--query", default="Which services are affected by the payments table failure?")
-    p.add_argument("--host", help="Ollama server URL (ollama only; default http://10.0.0.100:11434)")
+    p.add_argument("--host", help="Ollama server URL (ollama only; default $OLLAMA_BASE_URL from .env)")
     p.add_argument(
         "--embed-model",
         help="Ollama embedding model (ollama only; default nomic-embed-text or $OLLAMA_EMBED_MODEL)",

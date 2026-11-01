@@ -20,7 +20,13 @@ pip install -e ".[ollama]"      # or ".[anthropic]" / ".[ollama,anthropic,dev]"
 ```
 
 The LLM provider is set by `PROVIDER` at the top of `main.py` (`"ollama"` or `"anthropic"`).
-For Anthropic, put your API key in a `key.txt` file in the repo root (it is gitignored).
+Copy `.env.example` to `.env` and fill in your settings (`.env` is gitignored):
+
+| Variable             | Purpose                                             |
+| -------------------- | --------------------------------------------------- |
+| `ANTHROPIC_API_KEY`  | API key, needed only for the `anthropic` provider   |
+| `OLLAMA_BASE_URL`    | Ollama server URL (default `http://localhost:11434`) |
+| `OLLAMA_EMBED_MODEL` | Embedding model (default `nomic-embed-text`)        |
 
 ## Usage
 

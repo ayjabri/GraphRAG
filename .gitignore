@@ -20,9 +20,9 @@ env/
 htmlcov/
 
 # Secrets / local config
-key.txt
 .env
 .env.*
+!.env.example
 
 # Editors / OS
 .idea/
