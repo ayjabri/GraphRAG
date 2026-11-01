@@ -16,31 +16,75 @@ otherwise the retrieved evidence is returned as the answer.
 
 ```mermaid
 flowchart TD
-    subgraph INIT["Initiation: __init__ -> __launch__ (once)"]
-        A([TraditionalRAG docs, top_k, use_llm, provider]) --> B["__launch__"]
-        B -.->|"use_llm only"| C["get_llm(provider)<br/>store as self._llm"]
-        B --> D["_build_index"]
-        D --> E["tokenize each document"]
-        E --> F["build_tfidf_idf<br/>IDF weight per word"]
+    subgraph INIT["Initiation (once)"]
+        A(["TraditionalRAG(docs, top_k, use_llm, provider)"]) --> LAUNCH_IN
+
+        subgraph LAUNCH["__launch__"]
+            direction TB
+            LAUNCH_IN[" "]:::hidden
+            LLMB["get_llm(provider)<br/>stored as self._llm"]
+
+            subgraph BUILD["_build_index"]
+                direction TB
+                T1["tokenize each document"] --> T2["build_tfidf_idf<br/>IDF weight per word"]
+            end
+
+            LAUNCH_IN -.->|"use_llm only"| LLMB
+            LAUNCH_IN --> T1
+        end
     end
 
     subgraph QUERY["Query: fit_predict(query)"]
-        G([query]) --> H["fit: store query"]
-        H --> I["_tokenize_query"]
-        I --> J["predict"]
-        J --> K["_dense: tfidf_scores<br/>vec + cosine per document"]
-        K --> L["rank: sort by score, drop scores <= 0"]
-        L --> M["keep top_k as evidence"]
-        M --> N["_answer"]
-        N -->|"use_llm = False"| O["join evidence text with [doc_id]"]
-        N -.->|"use_llm = True"| P["llm_answer<br/>prompt + self._llm.invoke"]
-        O --> Q["result: answer, verdict, provenance, trace"]
-        P -.-> Q
-        Q --> R["show: print result"]
+        direction TB
+        G(["query"]) --> F1
+
+        subgraph FIT["fit"]
+            direction TB
+            F1["store query"] --> F2["_tokenize_query<br/>tokenize the query"]
+        end
+
+        F2 --> D1
+
+        subgraph PREDICT["predict"]
+            direction TB
+
+            subgraph DENSE["_dense"]
+                direction TB
+                subgraph TS["tfidf_scores"]
+                    direction TB
+                    D1["vec: query vector"] --> D2["vec: document vector"] --> D3["cosine: query vs document"]
+                end
+            end
+
+            D3 --> R1["rank<br/>sort by score, drop scores <= 0"]
+            R1 --> R2["keep top_k as evidence"]
+
+            subgraph ANSWER["_answer"]
+                direction TB
+                A0{"use_llm?"}
+                A1["join evidence text with [doc_id]"]
+
+                subgraph LLMA["llm_answer"]
+                    direction TB
+                    L1["build system + user messages"] --> L2["self._llm.invoke"]
+                end
+
+                A0 -->|"no"| A1
+                A0 -.->|"yes"| L1
+            end
+
+            R2 --> A0
+            A1 --> P1["answer, verdict, provenance, trace"]
+            L2 -.-> P1
+        end
+
+        P1 --> S1["show: print result"]
     end
 
-    F --> G
-    C -.-> P
+    T2 --> G
+    LLMB -.-> L2
+
+    classDef hidden fill:none,stroke:none,color:none,width:0px,height:0px;
 ```
 
 ## Setup
