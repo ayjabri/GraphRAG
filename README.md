@@ -87,6 +87,135 @@ flowchart TD
     classDef hidden fill:none,stroke:none,color:none,width:0px,height:0px;
 ```
 
+## How `GraphRAG` works
+
+`GraphRAG` extends `TraditionalRAG`: it adds BM25 statistics and the graph at initiation, then
+an ACL filter, BM25 ranking, rank fusion, a graph walk and a citation check at query time.
+The dotted path is the optional LLM route, taken only when `use_llm=True`.
+`OllamaGraphRAG` is identical except that `_dense` uses Ollama embeddings instead of TF-IDF.
+
+```mermaid
+flowchart TD
+    subgraph INIT["Initiation (once)"]
+        A(["GraphRAG(docs, edges, groups, top_k, hops, rrf_k, use_llm, provider)"]) --> I0["store edges, groups, hops, rrf_k"]
+        I0 --> LAUNCH_IN
+
+        subgraph LAUNCH["__launch__"]
+            direction TB
+            LAUNCH_IN[" "]:::hidden
+            LLMB["get_llm(provider)<br/>stored as self._llm"]
+
+            subgraph BUILD["_build_index"]
+                direction TB
+                T1["tokenize each document"] --> T2["build_tfidf_idf<br/>IDF weight per word"] --> T3["build_bm25_idf<br/>BM25 IDF weight per word"]
+            end
+
+            AVG["_build_avg_len<br/>average document length"]
+
+            subgraph GRAPH["_build_graph"]
+                direction TB
+                G1["validate edge endpoints exist"] --> G2["add forward edge and reverse edge ~"]
+            end
+
+            LAUNCH_IN -.->|"use_llm only"| LLMB
+            LAUNCH_IN --> T1
+            T3 --> AVG --> G1
+        end
+    end
+
+    subgraph QUERY["Query: fit_predict(query)"]
+        direction TB
+        Q(["query"]) --> F1
+
+        subgraph FIT["fit"]
+            direction TB
+
+            subgraph TFIT["inherited fit"]
+                direction TB
+                F1["store query"] --> F2["_tokenize_query"]
+            end
+
+            F3["_init_trace<br/>start audit trace"]
+
+            subgraph ACL["_filter_acl"]
+                direction TB
+                C1["_allowed: user groups intersect document ACL"] --> C2["keep allowed docs, log counts in trace"]
+            end
+
+            subgraph BM["_rank_bm25"]
+                direction TB
+                B1["_bm25: score allowed docs"] --> B2["rank: sort, drop scores <= 0"]
+            end
+
+            F2 --> F3 --> C1
+            C2 --> B1
+        end
+
+        subgraph PREDICT["predict"]
+            direction TB
+
+            subgraph FUSE["Reciprocal Rank Fusion"]
+                direction TB
+                R1["_dense on allowed docs<br/>TF-IDF cosine, then rank"]
+                R2["fuse BM25 ranking + dense ranking<br/>score = sum of 1 / rrf_k + position + 1"]
+                R1 --> R2
+            end
+
+            R3["seeds = top_k fused docs"]
+
+            subgraph WALK["Graph walk, up to hops steps"]
+                direction TB
+                W1["for each frontier node, follow edges"] --> W2{"neighbor already in context?"}
+                W2 -->|"no"| W3{"_allowed(neighbor)?"}
+                W2 -->|"yes"| W5["skip"]
+                W3 -->|"yes"| W4["add to context, next frontier"]
+                W3 -->|"no"| W6["drop, log in trace"]
+            end
+
+            R4["evidence = all context documents"]
+
+            subgraph ANSWER["_answer"]
+                direction TB
+                A0{"use_llm?"}
+                A1["join evidence text with [doc_id]"]
+
+                subgraph LLMA["llm_answer"]
+                    direction TB
+                    L1["build system + user messages"] --> L2["self._llm.invoke"]
+                end
+
+                A0 -->|"no"| A1
+                A0 -.->|"yes"| L1
+            end
+
+            subgraph CITE["Citation check"]
+                direction TB
+                K1["extract cited [doc_id] from answer"] --> K2{"cited and all in context?"}
+                K2 -->|"yes"| K3["verdict: grounded"]
+                K2 -->|"no"| K4["verdict: UNGROUNDED"]
+            end
+
+            R2 --> R3 --> W1
+            W4 --> R4
+            W5 --> R4
+            W6 --> R4
+            R4 --> A0
+            A1 --> K1
+            L2 -.-> K1
+            K3 --> P1["result: answer, verdict, provenance, trace"]
+            K4 --> P1
+        end
+
+        B2 --> R1
+        P1 --> S1["show: print result"]
+    end
+
+    G2 --> Q
+    LLMB -.-> L2
+
+    classDef hidden fill:none,stroke:none,color:none,width:0px,height:0px;
+```
+
 ## Setup
 
 Requires Python 3.10+.
