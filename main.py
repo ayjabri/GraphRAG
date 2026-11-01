@@ -97,7 +97,7 @@ class TraditionalRAG:
         - document tokenization and TF-IDF indexing (_build_index)
         - query tokenization (fit)
         - TF-IDF cosine scoring (_dense), using tfidf_idf
-        - shared token, vector, cosine, rank, LLM and display methods
+        - shared token, vector, cosine, _rank, LLM and display methods
         - formatting an answer from evidence (_answer)
         - fit_predict convenience method
 
@@ -439,7 +439,7 @@ class TraditionalRAG:
         return score
 
     @staticmethod
-    def rank(scores):
+    def _rank(scores):
         """
         Rank documents by their relevance scores in descending order.
 
@@ -483,7 +483,7 @@ class TraditionalRAG:
         Examples
         --------
         >>> scores = {1: 0.85, 2: 0.0, 3: 0.62}
-        >>> rank(scores)
+        >>> _rank(scores)
         [1, 3]
 
         Important
@@ -496,14 +496,24 @@ class TraditionalRAG:
         """
         return [d for d, s in sorted(scores.items(), key=lambda kv: -kv[1]) if s > 0]
 
-    def _tokenize_query(self):
-        """Tokenize the stored query."""
-        self.q_tokens = self.tokenize(self.query)
+    # def _tokenize_query(self):
+    #     """Tokenize the stored query."""
+    #     self.q_tokens = self.tokenize(self.query)
+
+    def _select_top_k(self):
+        """Keep the IDs of the top_k best-ranked documents."""
+        return self.dense[:self.top_k]
+
+    def _get_evidence(self):
+        """Pair each selected document ID with its text."""
+        return [(d, self.docs[d]["text"]) for d in self.top]
 
     def fit(self, query):
-        """Store the query, run every preparation step in order; return self."""
+        """Store the query, tokenize it, rank all documents; return self."""
         self.query = query
-        self._tokenize_query()
+        self.q_tokens = self.tokenize(self.query)
+        self.dense_scores = self._dense(list(self.docs))
+        self.dense = self._rank(self.dense_scores)
         return self
 
     @staticmethod
@@ -597,20 +607,20 @@ class TraditionalRAG:
         return " ".join(f"{text} [{doc_id}]" for doc_id, text in evidence)
 
     def predict(self):
-        """Rank all documents by TF-IDF similarity and return top-k.
+        """Select the top-k documents from the ranking built in fit() and answer.
 
         Returns
         -------
         dict
             answer, verdict (not checked), provenance and audit trace.
         """
-        scores = self._dense(list(self.docs))
-        top = self.rank(scores)[:self.top_k]
-        self.evidence = [(d, self.docs[d]["text"]) for d in top]
+        self.top = self._select_top_k()
+        self.evidence = self._get_evidence()
+        answer = self._answer(self.evidence)
         return {
-            "answer": self._answer(self.evidence),
+            "answer": answer,
             "verdict": "not checked",
-            "provenance": {d: f"top-{self.top_k} by similarity" for d in top},
+            "provenance": {d: f"top-{self.top_k} by similarity" for d in self.top},
             "trace": [
                 f"TF-IDF cosine search over {len(self.docs)} docs; "
                 "no ACL filter, no BM25, no graph walk"
@@ -648,7 +658,7 @@ class TraditionalRAG:
     #     query_vec = self.vec(q_tokens, vocab, idf)
     #     doc1_vec = self.vec(tokens[1], vocab, idf)
     #     scores = self.tfidf_scores(q_tokens, list(docs), tokens, idf)
-    #     ranked_ids = self.rank(scores)
+    #     ranked_ids = self._rank(scores)
     #     evidence = [(doc_id, docs[doc_id]) for doc_id in ranked_ids[:3]]
     #     return {"query_vector": query_vec, "doc1_vector": doc1_vec,
     #             "scores": scores, "evidence": evidence}
@@ -706,7 +716,9 @@ class GraphRAG(TraditionalRAG):
 
     def __launch__(self):
         """Inherited TF-IDF index, then BM25 statistics and the graph."""
-        super().__launch__()
+        # super().__launch__()
+        self._llm = self.get_llm(self.provider) if self.use_llm else None
+        self._build_index()        
         self._build_avg_len()
         self._build_graph()
 
@@ -741,7 +753,7 @@ class GraphRAG(TraditionalRAG):
         return bool(set(self.docs[doc_id]["acl"]) & self.groups)
 
     def _bm25(self, doc_ids, k1=1.5, b=0.75):
-        """Score authorized docs with BM25 term frequency and length norm.
+        r"""Score authorized docs with BM25 term frequency and length norm.
 
         Parameters
         ----------
@@ -755,9 +767,22 @@ class GraphRAG(TraditionalRAG):
         Returns
         -------
         dict
-            Document ID -> BM25 score.
+            Document ID -> BM25 score (Best Matching 25).
 
-            Best Matching 25 
+        Notes
+        -----
+        For query :math:`Q` and document :math:`d`:
+
+        .. math::
+
+            \mathrm{BM25}(Q, d) = \sum_{w \in Q} \mathrm{IDF}(w) \cdot
+                \frac{f(w, d)\,(k_1 + 1)}
+                     {f(w, d) + k_1 \left(1 - b + b \,\frac{|d|}{\overline{|d|}}\right)}
+
+        where :math:`f(w, d)` is the count of word :math:`w` in :math:`d`,
+        :math:`|d|` is the document length in tokens, :math:`\overline{|d|}`
+        is the average document length, and :math:`\mathrm{IDF}(w)` comes
+        from build_bm25_idf(). Words absent from :math:`d` contribute zero.
         """
         scores = {}
         for d in doc_ids:
@@ -773,28 +798,27 @@ class GraphRAG(TraditionalRAG):
         return scores
 
     def fit(self, query):
-        """Inherited query tokenization, then trace reset, ACL filter, BM25 ranking."""
-        super().fit(query)
-        self._init_trace()
-        self._filter_acl()
-        self._rank_bm25()
+        """Inherited query tokenization, then trace reset, ACL filter, BM25 and dense ranking."""
+        # super().fit(query)
+        self.query = query
+        self.q_tokens = self.tokenize(self.query)
+        self.trace = []  #Start a fresh audit trace for this query.
+        self.allowed, self.trace = self._filter_acl(self.trace)
+        self.dense_scores = self._dense(self.allowed)
+        self.dense = self._rank(self.dense_scores) # Ideally it should be a semantic function but here it's also keyword matching but using different weighting formula
+        self.lex_scores = self._bm25(self.allowed)
+        self.lex = self._rank(self.lex_scores)  # lexical ranking, meaning keyword matching
         return self
 
-    def _init_trace(self):
-        """Start a fresh audit trace for this query."""
-        self.trace = []
 
-    def _filter_acl(self):
+    def _filter_acl(self, trace):
         """Keep only documents the requesting groups may read."""
-        self.allowed = [d for d in self.docs if self._allowed(d)]
-        self.trace.append(
-            f"acl: groups={sorted(self.groups)} allowed={self.allowed} "
-            f"blocked={len(self.docs) - len(self.allowed)}"
+        allowed = [d for d in self.docs if self._allowed(d)]
+        trace.append(
+            f"acl: groups={sorted(self.groups)} allowed={allowed} "
+            f"blocked={len(self.docs) - len(allowed)}"
         )
-
-    def _rank_bm25(self):
-        """BM25-rank the authorized documents against the query."""
-        self.lex = self.rank(self._bm25(self.allowed))
+        return (allowed, trace)
 
     def predict(self):
         """Fuse BM25 + inherited similarity; expand seeds through the graph.
@@ -815,7 +839,7 @@ class GraphRAG(TraditionalRAG):
         Final context may contain MORE than top_k documents.
         """
         fused = defaultdict(float)
-        for ranking in (self.lex, self.rank(self._dense(self.allowed))):
+        for ranking in (self.lex, self.dense):
             for i, d in enumerate(ranking):
                 fused[d] += 1.0 / (self.rrf_k + i + 1)
         seeds = [d for d, _ in sorted(fused.items(), key=lambda kv: -kv[1])][:self.top_k]
@@ -855,7 +879,8 @@ class GraphRAG(TraditionalRAG):
             "trace": self.trace,
         }
 
-    def build_bm25_idf(self, tokens):
+    @staticmethod
+    def build_bm25_idf(tokens):
         r"""
         Calculate Robertson-style BM25 inverse document frequency (IDF).
 
@@ -954,3 +979,10 @@ if __name__ == "__main__":
     args = parse_args()
     model = RAG_MODELS[args.model](DOCS, EDGES, groups=args.groups)
     model.fit_predict(args.query)
+
+
+
+#%%
+
+    g = GraphRAG(DOCS, EDGES, args.groups)
+    t = TraditionalRAG(DOCS, EDGES, args.groups)

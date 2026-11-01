@@ -3,11 +3,11 @@
 A small, self-contained comparison of **Traditional RAG** and **Graph RAG** on a toy
 corpus of services and tables, implemented as three classes in [main.py](main.py):
 
-| Class            | What it does                                                                     |
-| ---------------- | -------------------------------------------------------------------------------- |
-| `TraditionalRAG` | TF-IDF top-k over everything. No permissions, no graph, no citation check.       |
-| `GraphRAG`       | ACL filter, BM25 + TF-IDF fused with RRF, graph walk, citation check.            |
-| `OllamaGraphRAG` | `GraphRAG`, but the dense retrieval step uses an Ollama embedding model.         |
+| Class               | What it does                                                               |
+| ------------------- | -------------------------------------------------------------------------- |
+| `TraditionalRAG`    | TF-IDF top-k over everything. No permissions, no graph, no citation check. |
+| `GraphRAG`          | ACL filter, BM25 + TF-IDF fused with RRF, graph walk, citation check.      |
+| `EmbeddingGraphRAG` | `GraphRAG`, but the dense step uses an Ollama embedding model.             |
 
 ## How `TraditionalRAG` works
 
@@ -40,24 +40,29 @@ flowchart TD
 
         subgraph FIT["fit"]
             direction TB
-            F1["store query"] --> F2["_tokenize_query<br/>tokenize the query"]
+            F1["store query"] --> F2["tokenize query"]
+
+            subgraph RD["dense ranking: _rank(_dense(all docs))"]
+                direction TB
+                subgraph DENSE["_dense"]
+                    direction TB
+                    subgraph TS["tfidf_scores"]
+                        direction TB
+                        D1["vec: query vector"] --> D2["vec: document vector"] --> D3["cosine: query vs document"]
+                    end
+                end
+                D3 --> R1["_rank<br/>sort by score, drop scores <= 0"]
+            end
+
+            F2 --> D1
         end
 
-        F2 --> D1
+        R1 --> R2
 
         subgraph PREDICT["predict"]
             direction TB
-
-            subgraph DENSE["_dense"]
-                direction TB
-                subgraph TS["tfidf_scores"]
-                    direction TB
-                    D1["vec: query vector"] --> D2["vec: document vector"] --> D3["cosine: query vs document"]
-                end
-            end
-
-            D3 --> R1["rank<br/>sort by score, drop scores <= 0"]
-            R1 --> R2["keep top_k as evidence"]
+            R2["_select_top_k<br/>keep top_k document IDs"] --> R3["_get_evidence<br/>pair each ID with its text"]
+            R3 --> A0
 
             subgraph ANSWER["_answer"]
                 direction TB
@@ -73,7 +78,6 @@ flowchart TD
                 A0 -.->|"yes"| L1
             end
 
-            R2 --> A0
             A1 --> P1["answer, verdict, provenance, trace"]
             L2 -.-> P1
         end
@@ -90,9 +94,11 @@ flowchart TD
 ## How `GraphRAG` works
 
 `GraphRAG` extends `TraditionalRAG`: it adds BM25 statistics and the graph at initiation, then
-an ACL filter, BM25 ranking, rank fusion, a graph walk and a citation check at query time.
+an ACL filter, BM25 ranking (`lex`) and similarity ranking (`dense`) in `fit`, then rank fusion,
+a graph walk and a citation check in `predict`. In `GraphRAG` both rankings are keyword-based
+(BM25 versus TF-IDF cosine); only `EmbeddingGraphRAG` makes `dense` semantic.
 The dotted path is the optional LLM route, taken only when `use_llm=True`.
-`OllamaGraphRAG` is identical except that `_dense` uses Ollama embeddings instead of TF-IDF.
+`EmbeddingGraphRAG` is identical except that `_dense` uses Ollama embeddings instead of TF-IDF.
 
 ```mermaid
 flowchart TD
@@ -130,36 +136,33 @@ flowchart TD
         subgraph FIT["fit"]
             direction TB
 
-            subgraph TFIT["inherited fit"]
-                direction TB
-                F1["store query"] --> F2["_tokenize_query"]
-            end
-
-            F3["_init_trace<br/>start audit trace"]
+            F1["store query"] --> F2["tokenize query"]
+            F3["start audit trace"]
 
             subgraph ACL["_filter_acl"]
                 direction TB
                 C1["_allowed: user groups intersect document ACL"] --> C2["keep allowed docs, log counts in trace"]
             end
 
-            subgraph BM["_rank_bm25"]
+            subgraph BM["lexical ranking: _rank(_bm25(allowed))"]
                 direction TB
-                B1["_bm25: score allowed docs"] --> B2["rank: sort, drop scores <= 0"]
+                B1["_bm25: score allowed docs"] --> B2["_rank: sort, drop scores <= 0"]
+            end
+
+            subgraph DR["dense ranking: _rank(_dense(allowed))"]
+                direction TB
+                D1["_dense on allowed docs<br/>TF-IDF cosine (embeddings in EmbeddingGraphRAG)"] --> D2["_rank: sort, drop scores <= 0"]
             end
 
             F2 --> F3 --> C1
             C2 --> B1
+            B2 --> D1
         end
 
         subgraph PREDICT["predict"]
             direction TB
 
-            subgraph FUSE["Reciprocal Rank Fusion"]
-                direction TB
-                R1["_dense on allowed docs<br/>TF-IDF cosine, then rank"]
-                R2["fuse BM25 ranking + dense ranking<br/>score = sum of 1 / rrf_k + position + 1"]
-                R1 --> R2
-            end
+            R2["Reciprocal Rank Fusion of self.lex + self.dense<br/>score = sum of 1 / rrf_k + position + 1"]
 
             R3["seeds = top_k fused docs"]
 
@@ -206,7 +209,7 @@ flowchart TD
             K4 --> P1
         end
 
-        B2 --> R1
+        D2 --> R2
         P1 --> S1["show: print result"]
     end
 
@@ -268,12 +271,19 @@ LICENSE         # MIT
 ## Status
 
 Working prototype on a five-document toy corpus. Not yet verified end to end in a
-clean environment after the latest refactors (method reordering, `.env` config).
+clean environment after the latest refactors. Recent structural changes:
+
+- Pure helpers (`tokenize`, `build_tfidf_idf`, `vec`, `cosine`, `_rank`, `build_bm25_idf`, `get_llm`) are `@staticmethod`s.
+- The LLM is built once in `__launch__` as `self._llm` and used by `llm_answer`.
+- Ollama host and embedding model come from `.env`; the `--host` and `--embed-model` flags were removed.
+- `OllamaGraphRAG` was renamed `EmbeddingGraphRAG` (still selected with `--model ollama`).
+- In `GraphRAG`, both rankings (`self.lex`, `self.dense`) are computed in `fit`; `predict` only fuses, walks the graph and answers.
+- `GraphRAG.fit` and `__launch__` no longer call `super()`; they repeat the inherited steps inline.
 
 Known gaps:
 
 - **No tests or CI.** The ACL filter, graph hops, RRF fusion and both IDF functions are the first candidates.
-- **Provider selection.** The CLI has no `--provider` flag; the provider comes from `PROVIDER` in `main.py`, and the `use_llm` default differs for `OllamaGraphRAG` (off) versus the other two (on).
+- **Provider selection.** The CLI has no `--provider` flag; the provider comes from `PROVIDER` in `main.py`, and the `use_llm` default differs for `EmbeddingGraphRAG` (off) versus the other two (on).
 - **Permission leaks in the audit trace.** It lists IDs of documents the user may not see, and IDF statistics include restricted documents.
 - **Weak citation check.** It verifies that cited IDs exist in the context, not that claims are supported, and its regex ignores IDs containing `-` or `.`.
 - **`GraphRAG` requires `edges`.** Passing `None` raises an error.
