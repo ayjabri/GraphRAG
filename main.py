@@ -45,6 +45,10 @@ PROVIDER = "ollama"  # "ollama" or "anthropic"
 
 LLM_MODELS = {"ollama": "qwen3.6:27b", "anthropic": "claude-haiku-5-5"}
 
+# Published API prices, USD per million tokens: (input, output, max prompt tokens the price covers).
+# Self-hosted Ollama models have no API price, so their cost is reported as None, not 0.
+LLM_PRICES_PER_MTOK = {"claude-haiku-5-5": (0.10, 0.50, 100_000)}
+
 
 load_dotenv()  # ANTHROPIC_API_KEY, OLLAMA_BASE_URL, OLLAMA_EMBED_MODEL from .env
 
@@ -636,8 +640,12 @@ class TraditionalRAG:
             3. Invoke the selected LLM using LangChain.
             4. Return the model's generated text.
 
-        The function is provider-independent.
+        The function is provider-independent. Each call records
+        ``self.llm_usage`` (the provider's token counts, or None) and
+        ``self.llm_ms`` (measured generation time) for calc_metric().
         """
+        self.llm_usage = None
+        self.llm_ms = 0.0
         if not evidence:
             return "Insufficient evidence to answer the question."
 
@@ -655,7 +663,10 @@ class TraditionalRAG:
             HumanMessage(content=f"Evidence:\n{ctx}\n\nQuestion: {query}"),
         ]
 
+        start = time.perf_counter()
         response = self._llm.invoke(messages)
+        self.llm_ms = (time.perf_counter() - start) * 1000
+        self.llm_usage = response.usage_metadata
 
         return response.text()
 
@@ -1436,8 +1447,8 @@ class GraphRAG(TraditionalRAG):
 
         Final context may contain MORE than top_k documents.
         """
-        fused = self._fuse()
-        seeds = fused[:self.top_k]
+        self.fused = self._fuse()
+        seeds = self.fused[:self.top_k]
         self.trace.append(f"seeds (bm25 + retrieval similarity via RRF): {seeds}")
 
         context = self._expand_graph(seeds)
