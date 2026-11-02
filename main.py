@@ -721,7 +721,7 @@ class GraphRAG(TraditionalRAG):
         """Inherited TF-IDF index, then BM25 statistics and the graph."""
         # super().__launch__()
         self._llm = self.get_llm(self.provider) if self.use_llm else None
-        self._build_index()        
+        self._build_index()
         self._build_avg_len()
         self._build_graph()
 
@@ -732,6 +732,41 @@ class GraphRAG(TraditionalRAG):
         self.vocab = list(self.tfidf_idf)
         self.doc_vectors = {d: self.vec(t, self.vocab, self.tfidf_idf) for d, t in self.tokens.items()}
         self.bm25_idf = self.build_bm25_idf(self.tokens)
+
+    @staticmethod
+    def build_bm25_idf(tokens):
+        r"""
+        Calculate Robertson-style BM25 inverse document frequency (IDF).
+
+        Parameters
+        ----------
+        tokens : dict
+            Document ID -> list of word tokens.
+
+        Returns
+        -------
+        dict
+            Word -> nonnegative BM25 IDF weight.
+
+        Notes
+        -----
+        .. math::
+
+            \mathrm{IDF}(w) = \ln\!\left(1 + \frac{N - \mathrm{df}(w) + 0.5}
+                                                  {\mathrm{df}(w) + 0.5}\right)
+
+        where :math:`N` is the total number of documents and
+        :math:`\mathrm{df}(w)` is the number of documents containing word
+        :math:`w`.
+
+        Common words approach an IDF of zero. Used by GraphRAG._bm25().
+        """
+        n = len(tokens)
+        df = Counter(w for words in tokens.values() for w in set(words))
+        return {
+            w: math.log(1 + (n - count + 0.5) / (count + 0.5))
+            for w, count in df.items()
+        }
 
     def _build_avg_len(self):
         """Average document length in tokens, used by BM25 length norm."""
@@ -803,20 +838,6 @@ class GraphRAG(TraditionalRAG):
             scores[d] = s
         return scores
 
-    def fit(self, query):
-        """Inherited query tokenization, then trace reset, ACL filter, BM25 and dense ranking."""
-        # super().fit(query)
-        self.query = query
-        self.q_tokens = self.tokenize(self.query)
-        self.trace = []  #Start a fresh audit trace for this query.
-        self.allowed, self.trace = self._filter_acl(self.trace)
-        self.dense_scores = self._dense(self.allowed)
-        self.dense = self._rank(self.dense_scores) # Ideally it should be a semantic function but here it's also keyword matching but using different weighting formula
-        self.lex_scores = self._bm25(self.allowed)
-        self.lex = self._rank(self.lex_scores)  # lexical ranking, meaning keyword matching
-        return self
-
-
     def _filter_acl(self, trace):
         """Keep only documents the requesting groups may read."""
         allowed = [d for d in self.docs if self._allowed(d)]
@@ -825,6 +846,20 @@ class GraphRAG(TraditionalRAG):
             f"blocked={len(self.docs) - len(allowed)}"
         )
         return (allowed, trace)
+
+    def fit(self, query):
+        """Inherited query tokenization, then trace reset, ACL filter, BM25 and dense ranking."""
+        # super().fit(query)
+        self.query = query
+        self.q_tokens = self.tokenize(self.query)
+        self.trace = []  # Start a fresh audit trace for this query.
+        self.allowed, self.trace = self._filter_acl(self.trace)
+        self.dense_scores = self._dense(self.allowed)
+        # Ideally it should be a semantic function but here it's also keyword matching but using different weighting formula
+        self.dense = self._rank(self.dense_scores)
+        self.lex_scores = self._bm25(self.allowed)
+        self.lex = self._rank(self.lex_scores)  # lexical ranking, meaning keyword matching
+        return self
 
     def _expand_graph(self, seeds):
         """Walk self.adj up to self.hops steps from the seeds, keeping only authorized docs.
@@ -845,9 +880,12 @@ class GraphRAG(TraditionalRAG):
         context = {d: "seed" for d in seeds}
         frontier = list(seeds)
         for hop in range(1, self.hops + 1):
+            print(hop)
             next_frontier = []
             for node in frontier:
+                print('\t', node)
                 for relationship, neighbor in self.adj.get(node, []):
+                    print(relationship, neighbor)
                     if neighbor in context:
                         continue
                     if not self._allowed(neighbor):
@@ -902,41 +940,6 @@ class GraphRAG(TraditionalRAG):
             "verdict": verdict,
             "provenance": context,
             "trace": self.trace,
-        }
-
-    @staticmethod
-    def build_bm25_idf(tokens):
-        r"""
-        Calculate Robertson-style BM25 inverse document frequency (IDF).
-
-        Parameters
-        ----------
-        tokens : dict
-            Document ID -> list of word tokens.
-
-        Returns
-        -------
-        dict
-            Word -> nonnegative BM25 IDF weight.
-
-        Notes
-        -----
-        .. math::
-
-            \mathrm{IDF}(w) = \ln\!\left(1 + \frac{N - \mathrm{df}(w) + 0.5}
-                                                  {\mathrm{df}(w) + 0.5}\right)
-
-        where :math:`N` is the total number of documents and
-        :math:`\mathrm{df}(w)` is the number of documents containing word
-        :math:`w`.
-
-        Common words approach an IDF of zero. Used by GraphRAG._bm25().
-        """
-        n = len(tokens)
-        df = Counter(w for words in tokens.values() for w in set(words))
-        return {
-            w: math.log(1 + (n - count + 0.5) / (count + 0.5))
-            for w, count in df.items()
         }
 
 
@@ -1006,8 +1009,7 @@ if __name__ == "__main__":
     model.fit_predict(args.query)
 
 
-
-#%%
+# %%
 
     g = GraphRAG(DOCS, EDGES, args.groups)
     t = TraditionalRAG(DOCS, EDGES, args.groups)

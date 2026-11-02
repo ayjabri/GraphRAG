@@ -31,6 +31,7 @@ flowchart TD
             subgraph BUILD["_build_index"]
                 direction TB
                 T1["tokenize each document<br/>-> self.tokens"] --> T2["build_tfidf_idf<br/>-> self.tfidf_idf"]
+                T2 --> TV["list of IDF words<br/>-> self.vocab"] --> TD["vec for each document<br/>-> self.doc_vectors"]
             end
 
             LAUNCH_IN -.->|"use_llm only"| LLMB
@@ -50,7 +51,7 @@ flowchart TD
                 direction TB
                 subgraph TS["tfidf_scores"]
                     direction TB
-                    D1["vec: query vector"] --> D2["vec: document vector"] --> D3["cosine: query vs document"]
+                    D1["vec: query vector only"] --> D2["look up precomputed<br/>self.doc_vectors"] --> D3["cosine: query vs document"]
                 end
             end
 
@@ -164,7 +165,7 @@ flowchart TD
             R1["Reciprocal Rank Fusion of self.lex + self.dense<br/>score = sum of 1 / (rrf_k + position + 1)"]
             R2["seeds = top_k fused docs"]
 
-            subgraph WALK["Graph walk, up to hops steps -> context"]
+            subgraph WALK["_expand_graph(seeds) -> context, up to hops steps"]
                 direction TB
                 W1["for each frontier node, follow edges"] --> W2{"neighbor already in context?"}
                 W2 -->|"no"| W3{"_allowed(neighbor)?"}
@@ -219,6 +220,26 @@ flowchart TD
     classDef hidden fill:none,stroke:none,color:none,width:0px,height:0px;
 ```
 
+### Graph expansion: `_expand_graph(seeds)`
+
+`predict` hands the fused seeds to `_expand_graph`, which walks `self.adj` hop by hop (up to `hops`),
+skips documents it has already reached, and drops any neighbor the user's groups may not read
+(logging the drop in the trace). It returns a dictionary of document ID to how that document was
+reached, in discovery order: seeds map to `"seed"`, and every discovered document maps to
+`"hop{n}:{from}-{relationship}->{doc}"`, where `~` marks an edge followed in reverse.
+`predict` uses its keys as the evidence and returns it as `provenance`.
+
+Example with group `sre`, `hops=2` and seed `tbl_payments`:
+
+```python
+{
+    "tbl_payments":  "seed",
+    "svc_ledger":    "hop1:tbl_payments-~DEPENDS_ON->svc_ledger",
+    "svc_reporting": "hop2:svc_ledger-~DEPENDS_ON->svc_reporting",
+}
+# trace: "hop1: dropped pm_payments via ~ABOUT (not entitled)"  (pm_payments is finance-only)
+```
+
 ## Setup
 
 Requires Python 3.10+.
@@ -262,23 +283,28 @@ LICENSE         # MIT
 
 | Branch | Purpose                                  |
 | ------ | ---------------------------------------- |
-| `main` | Stable baseline                          |
+| `main` | Stable baseline (protected)              |
 | `Dev`  | Active development                       |
 | `UAT`  | User acceptance testing before `main`    |
 
-`Dev` and `UAT` currently exist locally only; push them with `git push -u origin Dev UAT`.
+All three branches are on GitHub. `main` is protected, so work is committed and pushed to `Dev`
+and reaches `main` through a pull request.
 
 ## Status
 
-Working prototype on a five-document toy corpus. Not yet verified end to end in a
-clean environment after the latest refactors. Recent structural changes:
+Working prototype on a five-document toy corpus. `GraphRAG.fit_predict` runs end to end with
+`use_llm=False` and returns a grounded answer for the default query; the LLM path and
+`EmbeddingGraphRAG` have not been re-checked since the latest refactors. Recent structural changes:
 
 - Pure helpers (`tokenize`, `build_tfidf_idf`, `vec`, `cosine`, `_rank`, `build_bm25_idf`, `get_llm`) are `@staticmethod`s.
 - The LLM is built once in `__launch__` as `self._llm` and used by `llm_answer`.
 - Ollama host and embedding model come from `.env`; the `--host` and `--embed-model` flags were removed.
 - `OllamaGraphRAG` was renamed `EmbeddingGraphRAG` (still selected with `--model ollama`).
 - In `GraphRAG`, both rankings (`self.lex`, `self.dense`) are computed in `fit`; `predict` only fuses, walks the graph and answers.
-- `GraphRAG.fit` and `__launch__` no longer call `super()`; they repeat the inherited steps inline.
+- `GraphRAG.fit`, `__launch__` and `_build_index` no longer call `super()`; they repeat the inherited steps inline.
+- Document TF-IDF vectors are computed once in `_build_index` (`self.vocab`, `self.doc_vectors`); at query time `tfidf_scores` builds only the query vector.
+- The graph walk moved out of `GraphRAG.predict` into `_expand_graph(seeds)`; behavior is unchanged.
+- Each step in `fit`/`predict` is one line with a named intermediate (e.g. `self.dense_scores`, then `self.dense`), and a single shared `_rank` sorts both rankings.
 
 Known gaps:
 
@@ -287,7 +313,7 @@ Known gaps:
 - **Permission leaks in the audit trace.** It lists IDs of documents the user may not see, and IDF statistics include restricted documents.
 - **Weak citation check.** It verifies that cited IDs exist in the context, not that claims are supported, and its regex ignores IDs containing `-` or `.`.
 - **`GraphRAG` requires `edges`.** Passing `None` raises an error.
-- **Performance.** TF-IDF vectors are rebuilt per query and the graph walk has no context cap.
+- **Performance.** Document vectors are dense lists over the whole vocabulary, and the graph walk has no context cap. `EmbeddingGraphRAG` still builds TF-IDF document vectors it never uses.
 - **No retrieval evaluation** (e.g. recall@k) to compare the three models.
 
 ## License
