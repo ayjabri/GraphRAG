@@ -826,6 +826,40 @@ class GraphRAG(TraditionalRAG):
         )
         return (allowed, trace)
 
+    def _expand_graph(self, seeds):
+        """Walk self.adj up to self.hops steps from the seeds, keeping only authorized docs.
+
+        Returns
+        -------
+        dict
+            Document ID -> how it was reached, in discovery order:
+              - seeds map to "seed"
+              - discovered docs map to "hop{n}:{from}-{relationship}->{doc}",
+                e.g. "hop1:tbl_payments-~DEPENDS_ON->svc_ledger" ("~" marks a reverse edge).
+
+        Notes
+        -----
+        Each doc is visited at most once. A neighbor that fails _allowed() is
+        not added and not walked further; it is logged in self.trace instead.
+        """
+        context = {d: "seed" for d in seeds}
+        frontier = list(seeds)
+        for hop in range(1, self.hops + 1):
+            next_frontier = []
+            for node in frontier:
+                for relationship, neighbor in self.adj.get(node, []):
+                    if neighbor in context:
+                        continue
+                    if not self._allowed(neighbor):
+                        self.trace.append(
+                            f"hop{hop}: dropped {neighbor} via {relationship} (not entitled)"
+                        )
+                        continue
+                    context[neighbor] = f"hop{hop}:{node}-{relationship}->{neighbor}"
+                    next_frontier.append(neighbor)
+            frontier = next_frontier
+        return context
+
     def predict(self):
         """Fuse BM25 + inherited similarity; expand seeds through the graph.
 
@@ -851,22 +885,7 @@ class GraphRAG(TraditionalRAG):
         seeds = [d for d, _ in sorted(fused.items(), key=lambda kv: -kv[1])][:self.top_k]
         self.trace.append(f"seeds (bm25 + retrieval similarity via RRF): {seeds}")
 
-        context = {d: "seed" for d in seeds}
-        frontier = list(seeds)
-        for hop in range(1, self.hops + 1):
-            next_frontier = []
-            for node in frontier:
-                for relationship, neighbor in self.adj.get(node, []):
-                    if neighbor in context:
-                        continue
-                    if not self._allowed(neighbor):
-                        self.trace.append(
-                            f"hop{hop}: dropped {neighbor} via {relationship} (not entitled)"
-                        )
-                        continue
-                    context[neighbor] = f"hop{hop}:{node}-{relationship}->{neighbor}"
-                    next_frontier.append(neighbor)
-            frontier = next_frontier
+        context = self._expand_graph(seeds)
         self.trace.append(f"context: {context}")
 
         self.evidence = [(d, self.docs[d]["text"]) for d in context]
