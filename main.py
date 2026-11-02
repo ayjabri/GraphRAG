@@ -19,10 +19,14 @@ import json
 import math
 import os
 import re
+import sqlite3
 import urllib.request
 from collections import Counter, defaultdict
+from pathlib import Path
 
+import polars as pl
 from dotenv import load_dotenv
+from scipy import sparse
 from warnings import filterwarnings
 
 filterwarnings("ignore")
@@ -37,6 +41,10 @@ LLM_MODELS = {"ollama": "qwen3.6:27b", "anthropic": "claude-haiku-5-5"}
 load_dotenv()  # ANTHROPIC_API_KEY, OLLAMA_BASE_URL, OLLAMA_EMBED_MODEL from .env
 
 OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
+
+# Persisted index folder next to this script (Parquet, NPZ, JSON, SQLite).
+VDB_PATH = Path(__file__).resolve().parent / "VDB"
+INDEX_VERSION = 1  # bump when the on-disk layout changes
 
 # ---------------------------------------------------------------- toy corpus
 DOCS = {
@@ -686,6 +694,9 @@ class GraphRAG(TraditionalRAG):
         Reciprocal Rank Fusion smoothing constant.
     use_llm, provider
         Passed to TraditionalRAG.__init__.
+    index_path : str or Path, optional
+        Load a saved index from this folder instead of building one; ``docs``
+        and ``edges`` may then be None.
 
     Notes
     -----
@@ -694,7 +705,9 @@ class GraphRAG(TraditionalRAG):
 
     New/overridden:
         __init__()   - store graph-specific configuration and build edges
-        _build_index() - add BM25 indexing to the inherited TF-IDF index
+        __launch__() - build the index, or load it when index_path is set
+        _build_bm25_index() - precompute BM25 TF, doc lengths, IDF, avg length
+        save_index() / load_index() - persist / restore indexes in VDB/
         _build_graph() - adjacency list for traversal
         _allowed()  - enforce document permissions
         _bm25()     - score lexical relevance with TF saturation/length norm
@@ -707,31 +720,54 @@ class GraphRAG(TraditionalRAG):
     """
 
     def __init__(self, docs, edges, groups, top_k=3, hops=2,
-                 rrf_k=60, use_llm=True, provider="ollama"):
+                 rrf_k=60, use_llm=True, provider="ollama", index_path=None):
         self.edges = edges
         self.groups = set(groups)
         self.hops = hops
         self.rrf_k = rrf_k
+        self.index_path = index_path
 
         # Inherit LLM initialization, document tokenization, and IDF indexing.
         super().__init__(docs=docs, top_k=top_k, use_llm=use_llm,
                          provider=provider)
 
     def __launch__(self):
-        """Inherited TF-IDF index, then BM25 statistics and the graph."""
-        # super().__launch__()
-        self._llm = self.get_llm(self.provider) if self.use_llm else None
-        self._build_index()
-        self._build_avg_len()
-        self._build_graph()
+        """Build the index from docs, or load a saved one from index_path.
 
-    def _build_index(self):
-        """Tokenize documents, compute TF-IDF IDF weights and document vectors, then BM25 IDF."""
-        self.tokens = {d: self.tokenize(v["text"]) for d, v in self.docs.items()}
-        self.tfidf_idf = self.build_tfidf_idf(self.tokens)
-        self.vocab = list(self.tfidf_idf)
-        self.doc_vectors = {d: self.vec(t, self.vocab, self.tfidf_idf) for d, t in self.tokens.items()}
+        With ``index_path`` set, ``docs`` and ``edges`` may be None: documents,
+        ACLs, edges and every index come from disk and nothing is retokenized.
+        """
+        if self.index_path is None:
+            super().__launch__()
+            self._build_bm25_index()
+            self._build_graph()
+        else:
+            self._llm = self.get_llm(self.provider) if self.use_llm else None
+            self.load_index(self.index_path)
+
+    def _build_bm25_index(self):
+        """Precompute every document-dependent BM25 statistic once.
+
+        Requires ``self.tokens`` (built by ``_build_index``).
+
+        Sets
+        ----
+        bm25_tf : dict
+            Document ID -> Counter of token frequencies.
+        bm25_doc_len : dict
+            Document ID -> number of tokens.
+        bm25_idf : dict
+            Word -> BM25 IDF weight, from build_bm25_idf().
+        avg_len : float
+            Average document length in tokens (0.0 for an empty corpus).
+        """
+        self.bm25_tf = {d: Counter(t) for d, t in self.tokens.items()}
+        self.bm25_doc_len = {d: len(t) for d, t in self.tokens.items()}
         self.bm25_idf = self.build_bm25_idf(self.tokens)
+        self.avg_len = (
+            sum(self.bm25_doc_len.values()) / len(self.bm25_doc_len)
+            if self.bm25_doc_len else 0.0
+        )
 
     @staticmethod
     def build_bm25_idf(tokens):
@@ -763,17 +799,182 @@ class GraphRAG(TraditionalRAG):
         """
         n = len(tokens)
         df = Counter(w for words in tokens.values() for w in set(words))
+        return GraphRAG.bm25_idf_from_df(df, n)
+
+    @staticmethod
+    def bm25_idf_from_df(df, n):
+        """Apply the BM25 IDF formula to document frequencies.
+
+        Parameters
+        ----------
+        df : dict
+            Word -> number of documents containing it.
+        n : int
+            Total number of documents.
+
+        Returns
+        -------
+        dict
+            Word -> BM25 IDF weight. Shared by indexing and load_index(),
+            so a loaded index needs only ``df`` and ``n``, not the texts.
+        """
         return {
             w: math.log(1 + (n - count + 0.5) / (count + 0.5))
             for w, count in df.items()
         }
 
-    def _build_avg_len(self):
-        """Average document length in tokens, used by BM25 length norm."""
-        self.avg_len = (
-            sum(len(t) for t in self.tokens.values()) / len(self.tokens)
-            if self.tokens else 0.0
+    # ------------------------------------------------------------ persistence
+
+    def save_index(self, path=VDB_PATH):
+        """Write every query-independent index to ``path``.
+
+        Parameters
+        ----------
+        path : str or Path, default=VDB_PATH
+            Folder to write; created if missing.
+
+        Returns
+        -------
+        Path
+            The folder written.
+
+        Notes
+        -----
+        Each index uses the format that suits it:
+
+        - BM25 (Parquet, Polars)
+            bm25_postings.parquet   term, doc_id, tf  (inverted index, tf > 0 only)
+            bm25_documents.parquet  doc_id, doc_len
+            bm25_stats.parquet      term, df, n_docs, avg_doc_len
+        - TF-IDF (SciPy)
+            tfidf.npz               CSR matrix, rows = doc_ids, columns = vocab
+        - Metadata (JSON)
+            metadata.json           doc_ids, vocab, tfidf_idf, config
+        - Documents and graph (SQLite)
+            documents.db            documents, document_acl, graph_edges tables
+
+        BM25 IDF is not stored; load_index() rebuilds it from df and n_docs.
+        Query scores, rankings and RRF results are never saved.
+        """
+        path = Path(path)
+        path.mkdir(parents=True, exist_ok=True)
+        doc_ids = list(self.docs)
+
+        # BM25 (Parquet): inverted index grouped by term, docs in corpus order.
+        postings = pl.DataFrame(
+            [(w, d, n) for d in doc_ids for w, n in self.bm25_tf[d].items()],
+            schema={"term": pl.String, "doc_id": pl.String, "tf": pl.Int64},
+            orient="row",
+        ).sort("term", maintain_order=True)
+        bm25_documents = pl.DataFrame(
+            {"doc_id": doc_ids, "doc_len": [self.bm25_doc_len[d] for d in doc_ids]},
+            schema={"doc_id": pl.String, "doc_len": pl.Int64},
         )
+        df = Counter(w for tf in self.bm25_tf.values() for w in tf)
+        bm25_stats = pl.DataFrame(
+            {"term": list(df), "df": list(df.values())},
+            schema={"term": pl.String, "df": pl.Int64},
+        ).with_columns(
+            n_docs=pl.lit(len(doc_ids), dtype=pl.Int64),
+            avg_doc_len=pl.lit(self.avg_len, dtype=pl.Float64),
+        )
+        postings.write_parquet(path / "bm25_postings.parquet")
+        bm25_documents.write_parquet(path / "bm25_documents.parquet")
+        bm25_stats.write_parquet(path / "bm25_stats.parquet")
+
+        # TF-IDF (SciPy): one CSR row per document, one column per vocab term.
+        tfidf = sparse.csr_matrix(
+            [self.doc_vectors[d] for d in doc_ids],
+            shape=(len(doc_ids), len(self.vocab)), dtype=float,
+        )
+        sparse.save_npz(path / "tfidf.npz", tfidf)
+
+        # Metadata (JSON): orderings, TF-IDF IDF weights, indexing config.
+        metadata = {
+            "doc_ids": doc_ids,
+            "vocab": {w: i for i, w in enumerate(self.vocab)},
+            "tfidf_idf": self.tfidf_idf,
+            "config": {"index_version": INDEX_VERSION, "bm25_k1": 1.5, "bm25_b": 0.75},
+        }
+        (path / "metadata.json").write_text(json.dumps(metadata, indent=2), encoding="utf-8")
+
+        # Documents and graph (SQLite): text, one row per ACL group, directed edges.
+        db_path = path / "documents.db"
+        db_path.unlink(missing_ok=True)
+        con = sqlite3.connect(db_path)
+        con.execute("CREATE TABLE documents (doc_id TEXT PRIMARY KEY, text TEXT NOT NULL)")
+        con.execute("CREATE TABLE document_acl (doc_id TEXT REFERENCES documents, group_name TEXT)")
+        con.execute("CREATE TABLE graph_edges (source TEXT, relationship TEXT, target TEXT)")
+        con.executemany("INSERT INTO documents VALUES (?, ?)",
+                        [(d, self.docs[d]["text"]) for d in doc_ids])
+        con.executemany("INSERT INTO document_acl VALUES (?, ?)",
+                        [(d, g) for d in doc_ids for g in sorted(self.docs[d]["acl"])])
+        con.executemany("INSERT INTO graph_edges VALUES (?, ?, ?)",
+                        [tuple(e) for e in self.edges])
+        con.commit()
+        con.close()
+        return path
+
+    def load_index(self, path=VDB_PATH):
+        """Restore documents, ACLs, edges and all indexes from ``path``.
+
+        Parameters
+        ----------
+        path : str or Path, default=VDB_PATH
+            Folder written by save_index().
+
+        Returns
+        -------
+        GraphRAG
+            self, ready for fit() and predict().
+
+        Notes
+        -----
+        Rebuilds docs, edges, adj, bm25_tf, bm25_doc_len, bm25_idf, avg_len,
+        tfidf_idf, vocab and doc_vectors. No text is retokenized, so
+        ``self.tokens`` is not set. Raises ValueError on an index_version
+        mismatch.
+        """
+        path = Path(path)
+
+        # Metadata (JSON): document and vocabulary order come first.
+        metadata = json.loads((path / "metadata.json").read_text(encoding="utf-8"))
+        version = metadata["config"]["index_version"]
+        if version != INDEX_VERSION:
+            raise ValueError(f"Index version {version} at {path} != {INDEX_VERSION}; rebuild it.")
+        doc_ids = metadata["doc_ids"]
+        self.vocab = sorted(metadata["vocab"], key=metadata["vocab"].get)
+        self.tfidf_idf = {w: metadata["tfidf_idf"][w] for w in self.vocab}
+
+        # Documents and graph (SQLite).
+        con = sqlite3.connect(path / "documents.db")
+        texts = dict(con.execute("SELECT doc_id, text FROM documents"))
+        acl_rows = con.execute("SELECT doc_id, group_name FROM document_acl").fetchall()
+        edge_rows = con.execute("SELECT source, relationship, target FROM graph_edges ORDER BY rowid").fetchall()
+        con.close()
+        self.docs = {d: {"text": texts[d], "acl": set()} for d in doc_ids}
+        for doc_id, group in acl_rows:
+            self.docs[doc_id]["acl"].add(group)
+        self.edges = edge_rows
+        self._build_graph()  # adds the reverse links
+
+        # BM25 (Parquet): term counts from the postings, IDF from df + N.
+        postings = pl.read_parquet(path / "bm25_postings.parquet")
+        bm25_documents = pl.read_parquet(path / "bm25_documents.parquet")
+        bm25_stats = pl.read_parquet(path / "bm25_stats.parquet")
+        self.bm25_tf = {d: Counter() for d in doc_ids}
+        for term, doc_id, tf in postings.iter_rows():
+            self.bm25_tf[doc_id][term] = tf
+        self.bm25_doc_len = dict(zip(bm25_documents["doc_id"], bm25_documents["doc_len"]))
+        n_docs = len(doc_ids)
+        self.avg_len = bm25_stats["avg_doc_len"][0] if bm25_stats.height else 0.0
+        df = dict(zip(bm25_stats["term"], bm25_stats["df"]))
+        self.bm25_idf = self.bm25_idf_from_df(df, n_docs)
+
+        # TF-IDF (SciPy): dense per-document lists in the saved vocab order.
+        tfidf = sparse.load_npz(path / "tfidf.npz")
+        self.doc_vectors = dict(zip(doc_ids, tfidf.toarray().tolist()))
+        return self
 
     def _build_graph(self):
         """Create bidirectional adjacency lists, marking reverse edges '~'.
@@ -824,15 +1025,19 @@ class GraphRAG(TraditionalRAG):
         :math:`|d|` is the document length in tokens, :math:`\overline{|d|}`
         is the average document length, and :math:`\mathrm{IDF}(w)` comes
         from build_bm25_idf(). Words absent from :math:`d` contribute zero.
+
+        Only the query-dependent sum runs here; :math:`f(w, d)`, :math:`|d|`,
+        :math:`\overline{|d|}` and IDF are read from _build_bm25_index().
         """
         scores = {}
         for d in doc_ids:
-            tf = Counter(self.tokens[d])
+            tf = self.bm25_tf[d]
+            doc_len = self.bm25_doc_len[d]
             s = 0.0
             for w in self.q_tokens:
                 if w in tf:
                     denom = tf[w] + k1 * (
-                        1 - b + b * len(self.tokens[d]) / (self.avg_len or 1.0)
+                        1 - b + b * doc_len / (self.avg_len or 1.0)
                     )
                     s += self.bm25_idf.get(w, 0) * tf[w] * (k1 + 1) / denom
             scores[d] = s
@@ -952,13 +1157,14 @@ class EmbeddingGraphRAG(GraphRAG):
 
     def __init__(self, docs, edges, groups, top_k=3, hops=2, rrf_k=60,
                  use_llm=False, ollama_host=OLLAMA_BASE_URL,
-                 embed_model=None, provider="ollama"):
+                 embed_model=None, provider="ollama", index_path=None):
         self.ollama_host = ollama_host.rstrip("/")
         self.embed_model = embed_model or os.getenv("OLLAMA_EMBED_MODEL", "nomic-embed-text")
         self._cache = {}
         self._http = urllib.request.build_opener(urllib.request.ProxyHandler({}))
         super().__init__(docs=docs, edges=edges, groups=groups, top_k=top_k,
-                         hops=hops, rrf_k=rrf_k, use_llm=use_llm, provider=provider)
+                         hops=hops, rrf_k=rrf_k, use_llm=use_llm, provider=provider,
+                         index_path=index_path)
 
     def _embed(self, texts):
         """Request Ollama embeddings for new texts; cache prior results."""

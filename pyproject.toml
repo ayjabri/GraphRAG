@@ -13,12 +13,14 @@ dependencies = [
     "langchain>=0.3",
     "langchain-core>=0.3",
     "python-dotenv>=1.0",
+    "polars>=1.0",
+    "scipy>=1.10",
 ]
 
 [project.optional-dependencies]
 ollama = ["langchain-ollama"]
 anthropic = ["langchain-anthropic"]
-dev = ["ruff", "pytest"]
+dev = ["ruff", "pytest", "duckdb"]
 
 [tool.setuptools]
 py-modules = ["main"]

@@ -33,3 +33,6 @@ Thumbs.db
 
 # Jupyter
 .ipynb_checkpoints/
+
+# Generated index files (GraphRAG.save_index)
+VDB/

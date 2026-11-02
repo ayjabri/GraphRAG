@@ -269,10 +269,58 @@ python main.py --model graph --groups sre finance --query "your question"
 python main.py -h                                 # all options
 ```
 
+## Persisted index (`VDB/`)
+
+`GraphRAG` can save its query-independent indexes and load them back without retokenizing
+anything. Each part uses a format that suits it, much like a search engine keeps its inverted
+index, vectors, metadata and document store apart.
+
+```python
+from main import DOCS, EDGES, GraphRAG, VDB_PATH
+
+GraphRAG(DOCS, EDGES, ["sre"], use_llm=False).save_index()               # writes VDB/
+rag = GraphRAG(None, None, ["sre"], use_llm=False, index_path=VDB_PATH)  # loads, no rebuild
+rag.fit("payments table failure").predict()
+```
+
+| File                     | Format  | Contents                                             | Restores                     |
+| ------------------------ | ------- | ---------------------------------------------------- | ---------------------------- |
+| `bm25_postings.parquet`  | Parquet | `term`, `doc_id`, `tf` (inverted index)              | `bm25_tf`                    |
+| `bm25_documents.parquet` | Parquet | `doc_id`, `doc_len`                                  | `bm25_doc_len`               |
+| `bm25_stats.parquet`     | Parquet | `term`, `df`, `n_docs`, `avg_doc_len`                | `bm25_idf`, `avg_len`        |
+| `tfidf.npz`              | SciPy   | CSR matrix, rows = documents, columns = vocabulary   | `doc_vectors`                |
+| `metadata.json`          | JSON    | `doc_ids`, `vocab` (term -> column), `tfidf_idf`, `config` | `vocab`, `tfidf_idf`, ordering |
+| `documents.db`           | SQLite  | `documents`, `document_acl`, `graph_edges` tables    | `docs`, `edges`, `adj`       |
+
+BM25 IDF is not stored: it is recomputed from `df` and `n_docs`. Reverse graph links are
+rebuilt from the directed edges.
+
+Inspect the BM25 files with Polars or DuckDB:
+
+```python
+import polars as pl
+
+df = pl.read_parquet("VDB/bm25_postings.parquet")
+```
+
+```python
+import duckdb
+
+df = duckdb.sql("""
+    SELECT *
+    FROM 'VDB/bm25_postings.parquet'
+""").pl()
+```
+
+`python test_index_persistence.py` builds, queries, saves, reloads and checks that scores,
+rankings, ACL results and graph evidence are identical.
+
 ## Project layout
 
 ```
 main.py         # corpus, the three RAG classes, and the CLI
+test_index_persistence.py  # save_index / load_index round-trip test
+VDB/            # index written by GraphRAG.save_index() (Parquet, NPZ, JSON, SQLite)
 pyproject.toml  # packaging, dependencies, ruff config
 .env.example    # template for local settings (copy to .env)
 .vscode/        # shared editor settings (loads .env into the integrated terminal)
