@@ -19,7 +19,6 @@ import json
 import math
 import os
 import re
-import sqlite3
 import urllib.request
 from collections import Counter, defaultdict
 from pathlib import Path
@@ -42,7 +41,7 @@ load_dotenv()  # ANTHROPIC_API_KEY, OLLAMA_BASE_URL, OLLAMA_EMBED_MODEL from .en
 
 OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
 
-# Persisted index folder next to this script (Parquet, NPZ, JSON, SQLite).
+# Persisted index folder next to this script (Parquet, NPZ, JSON).
 VDB_PATH = Path(__file__).resolve().parent / "VDB"
 INDEX_VERSION = 1  # bump when the on-disk layout changes
 
@@ -850,8 +849,10 @@ class GraphRAG(TraditionalRAG):
             tfidf.npz               CSR matrix, rows = doc_ids, columns = vocab
         - Metadata (JSON)
             metadata.json           doc_ids, vocab, tfidf_idf, config
-        - Documents and graph (SQLite)
-            documents.db            documents, document_acl, graph_edges tables
+        - Documents (JSON)
+            documents.json          doc_id -> {"text", "acl"}
+        - Graph (JSON)
+            graph.json              directed edges as [source, relationship, target]
 
         BM25 IDF is not stored; load_index() rebuilds it from df and n_docs.
         Query scores, rankings and RRF results are never saved.
@@ -898,21 +899,13 @@ class GraphRAG(TraditionalRAG):
         }
         (path / "metadata.json").write_text(json.dumps(metadata, indent=2), encoding="utf-8")
 
-        # Documents and graph (SQLite): text, one row per ACL group, directed edges.
-        db_path = path / "documents.db"
-        db_path.unlink(missing_ok=True)
-        con = sqlite3.connect(db_path)
-        con.execute("CREATE TABLE documents (doc_id TEXT PRIMARY KEY, text TEXT NOT NULL)")
-        con.execute("CREATE TABLE document_acl (doc_id TEXT REFERENCES documents, group_name TEXT)")
-        con.execute("CREATE TABLE graph_edges (source TEXT, relationship TEXT, target TEXT)")
-        con.executemany("INSERT INTO documents VALUES (?, ?)",
-                        [(d, self.docs[d]["text"]) for d in doc_ids])
-        con.executemany("INSERT INTO document_acl VALUES (?, ?)",
-                        [(d, g) for d in doc_ids for g in sorted(self.docs[d]["acl"])])
-        con.executemany("INSERT INTO graph_edges VALUES (?, ?, ?)",
-                        [tuple(e) for e in self.edges])
-        con.commit()
-        con.close()
+        # Documents (JSON): text and ACL groups, in corpus order.
+        documents = {d: {"text": self.docs[d]["text"], "acl": sorted(self.docs[d]["acl"])} for d in doc_ids}
+        (path / "documents.json").write_text(json.dumps(documents, indent=2), encoding="utf-8")
+
+        # Graph (JSON): directed edges only.
+        edges = [list(e) for e in self.edges]
+        (path / "graph.json").write_text(json.dumps(edges, indent=2), encoding="utf-8")
         return path
 
     def load_index(self, path=VDB_PATH):
@@ -946,16 +939,13 @@ class GraphRAG(TraditionalRAG):
         self.vocab = sorted(metadata["vocab"], key=metadata["vocab"].get)
         self.tfidf_idf = {w: metadata["tfidf_idf"][w] for w in self.vocab}
 
-        # Documents and graph (SQLite).
-        con = sqlite3.connect(path / "documents.db")
-        texts = dict(con.execute("SELECT doc_id, text FROM documents"))
-        acl_rows = con.execute("SELECT doc_id, group_name FROM document_acl").fetchall()
-        edge_rows = con.execute("SELECT source, relationship, target FROM graph_edges ORDER BY rowid").fetchall()
-        con.close()
-        self.docs = {d: {"text": texts[d], "acl": set()} for d in doc_ids}
-        for doc_id, group in acl_rows:
-            self.docs[doc_id]["acl"].add(group)
-        self.edges = edge_rows
+        # Documents (JSON): ACL lists back to sets.
+        documents = json.loads((path / "documents.json").read_text(encoding="utf-8"))
+        self.docs = {d: {"text": documents[d]["text"], "acl": set(documents[d]["acl"])} for d in doc_ids}
+
+        # Graph (JSON): edges back to tuples.
+        edges = json.loads((path / "graph.json").read_text(encoding="utf-8"))
+        self.edges = [tuple(e) for e in edges]
         self._build_graph()  # adds the reverse links
 
         # BM25 (Parquet): term counts from the postings, IDF from df + N.

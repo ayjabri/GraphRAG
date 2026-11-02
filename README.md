@@ -290,7 +290,8 @@ rag.fit("payments table failure").predict()
 | `bm25_stats.parquet`     | Parquet | `term`, `df`, `n_docs`, `avg_doc_len`                | `bm25_idf`, `avg_len`        |
 | `tfidf.npz`              | SciPy   | CSR matrix, rows = documents, columns = vocabulary   | `doc_vectors`                |
 | `metadata.json`          | JSON    | `doc_ids`, `vocab` (term -> column), `tfidf_idf`, `config` | `vocab`, `tfidf_idf`, ordering |
-| `documents.db`           | SQLite  | `documents`, `document_acl`, `graph_edges` tables    | `docs`, `edges`, `adj`       |
+| `documents.json`         | JSON    | `doc_id` -> `text`, `acl` (list of groups)          | `docs`                       |
+| `graph.json`             | JSON    | directed edges as `[source, relationship, target]`   | `edges`, `adj`               |
 
 BM25 IDF is not stored: it is recomputed from `df` and `n_docs`. Reverse graph links are
 rebuilt from the directed edges.
@@ -320,7 +321,7 @@ rankings, ACL results and graph evidence are identical.
 ```
 main.py         # corpus, the three RAG classes, and the CLI
 test_index_persistence.py  # save_index / load_index round-trip test
-VDB/            # index written by GraphRAG.save_index() (Parquet, NPZ, JSON, SQLite)
+VDB/            # index written by GraphRAG.save_index() (Parquet, NPZ, JSON)
 pyproject.toml  # packaging, dependencies, ruff config
 .env.example    # template for local settings (copy to .env)
 .vscode/        # shared editor settings (loads .env into the integrated terminal)
