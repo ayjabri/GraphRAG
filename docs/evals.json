@@ -1,0 +1,134 @@
+[
+  {
+    "id": "downstream_impact_sre",
+    "query": "Which downstream processes were affected by the failed nightly settlement load?",
+    "groups": ["sre"],
+    "relevant": [
+      {"doc_id": "incident_inc_2291", "quote": "Downstream impacts were the general ledger close hold, the stale IRRBB run that could not be used for limit monitoring that day, the late liquidity engine run, and the late submission of the daily liquidity monitoring report."},
+      {"doc_id": "incident_inc_2291", "quote": "01:15 - Reconciliation reported a break of $2.3 million across four cash accounts and the general ledger close was placed on hold."},
+      {"doc_id": "general_ledger", "quote": "The most time-critical dependency is the nightly settlement load into settlement.settled_transactions, because payment reconciliation cannot start until that load has finished."},
+      {"doc_id": "payments_platform", "quote": "Because general ledger reconciliation starts only 15 minutes after the load SLA, any delay in stl_nightly_load quickly affects the ledger close and everything downstream of it."},
+      {"doc_id": "regulatory_reporting", "quote": "The lineage for the liquidity reports starts with settlement.settled_transactions in the payments platform, flows through payment reconciliation into gl.daily_balances, and then through the liquidity engine into the reporting data mart."}
+    ],
+    "reference": "The failed load left 312,000 settlements missing, so payment reconciliation reported a $2.3 million break and the general ledger close was held until 06:10 UTC. As a result gl.daily_balances was published 4 hours and 40 minutes late, the IRRBB engine ran on stale balances, the liquidity engine ran late, and the daily liquidity monitoring report was submitted 65 minutes after its deadline."
+  },
+  {
+    "id": "downstream_impact_data_eng",
+    "query": "Which downstream processes were affected by the failed nightly settlement load?",
+    "groups": ["data-eng"],
+    "relevant": [
+      {"doc_id": "incident_inc_2291", "quote": "Downstream impacts were the general ledger close hold, the stale IRRBB run that could not be used for limit monitoring that day, the late liquidity engine run, and the late submission of the daily liquidity monitoring report."},
+      {"doc_id": "incident_inc_2291", "quote": "01:15 - Reconciliation reported a break of $2.3 million across four cash accounts and the general ledger close was placed on hold."},
+      {"doc_id": "general_ledger", "quote": "The most time-critical dependency is the nightly settlement load into settlement.settled_transactions, because payment reconciliation cannot start until that load has finished."},
+      {"doc_id": "payments_platform", "quote": "Because general ledger reconciliation starts only 15 minutes after the load SLA, any delay in stl_nightly_load quickly affects the ledger close and everything downstream of it."},
+      {"doc_id": "regulatory_reporting", "quote": "The lineage for the liquidity reports starts with settlement.settled_transactions in the payments platform, flows through payment reconciliation into gl.daily_balances, and then through the liquidity engine into the reporting data mart."}
+    ],
+    "reference": "The documents available to this user do not describe the incident itself. They show that general ledger reconciliation starts 15 minutes after the load SLA, so a delayed stl_nightly_load affects the ledger close, and that the liquidity reports depend on settlement data through gl.daily_balances and the liquidity engine."
+  },
+  {
+    "id": "eve_outlier_test",
+    "query": "How is the EVE outlier test calculated and did the bank breach it?",
+    "groups": ["risk"],
+    "relevant": [
+      {"doc_id": "irrbb_measurement", "quote": "The supervisory outlier test compares the largest decline in EVE across the six scenarios with Tier 1 capital."},
+      {"doc_id": "irrbb_measurement", "quote": "A bank is an outlier if that decline exceeds 15 percent of Tier 1 capital."},
+      {"doc_id": "irrbb_measurement", "quote": "The largest EVE decline was $1.02 billion under the parallel up scenario, equal to 11.1 percent of Tier 1 capital, so the bank was not an outlier."}
+    ],
+    "reference": "The test compares the largest EVE decline across the six supervisory shock scenarios with Tier 1 capital, and a bank is an outlier if the decline exceeds 15 percent of Tier 1 capital. At 30 September 2026 the largest decline was $1.02 billion under the parallel up scenario, 11.1 percent of $9.2 billion Tier 1 capital and below the $1.38 billion threshold, so the bank did not breach it."
+  },
+  {
+    "id": "deposit_core_beta_treasury",
+    "query": "What core share and repricing beta does the deposit model use for retail instant-access savings?",
+    "groups": ["treasury"],
+    "relevant": [
+      {"doc_id": "deposit_behaviour_model", "quote": "For retail instant-access savings, the model sets the core share at 62 percent of stable balances."},
+      {"doc_id": "deposit_behaviour_model", "quote": "The model uses a repricing beta of 0.45 for retail instant-access savings."}
+    ],
+    "reference": "The model uses a core share of 62 percent of stable balances and a repricing beta of 0.45 for retail instant-access savings."
+  },
+  {
+    "id": "deposit_core_beta_sre",
+    "query": "What core share and repricing beta does the deposit model use for retail instant-access savings?",
+    "groups": ["sre"],
+    "relevant": [
+      {"doc_id": "deposit_behaviour_model", "quote": "For retail instant-access savings, the model sets the core share at 62 percent of stable balances."},
+      {"doc_id": "deposit_behaviour_model", "quote": "The model uses a repricing beta of 0.45 for retail instant-access savings."}
+    ],
+    "reference": "The documents available to this user do not contain the deposit model parameters."
+  },
+  {
+    "id": "irrbb_return_lineage",
+    "query": "What data feeds the quarterly IRRBB supervisory return?",
+    "groups": ["finance"],
+    "relevant": [
+      {"doc_id": "regulatory_reporting", "quote": "The quarterly IRRBB supervisory return takes EVE and NII results from irrbb.eve_nii_results."},
+      {"doc_id": "regulatory_reporting", "quote": "Those results depend on gl.daily_balances for positions and on alm.nmd_profiles for deposit behaviour, so the IRRBB return inherits the lineage of both the general ledger and the deposit model."},
+      {"doc_id": "irrbb_measurement", "quote": "Position balances come from the general ledger table gl.daily_balances, which is published by 01:30 UTC after the daily close."},
+      {"doc_id": "deposit_behaviour_model", "quote": "Each business day, the model publishes a repricing and run-off profile per product to the table alm.nmd_profiles by 02:00 UTC."}
+    ],
+    "reference": "The return takes EVE and NII results from irrbb.eve_nii_results. The IRRBB engine builds them from position balances in gl.daily_balances, behavioural deposit profiles in alm.nmd_profiles and Treasury market data curves, so the return inherits the lineage of the general ledger and the deposit model."
+  },
+  {
+    "id": "recon_tolerance",
+    "query": "What is the reconciliation tolerance for payment breaks in the general ledger and what happens when it is exceeded?",
+    "groups": ["finance"],
+    "relevant": [
+      {"doc_id": "general_ledger", "quote": "The reconciliation tolerance is $50,000 per cash account per day."},
+      {"doc_id": "general_ledger", "quote": "A difference above the tolerance is recorded as a reconciliation break and escalated to Finance Control."},
+      {"doc_id": "general_ledger", "quote": "If any cash account has an open break above the tolerance at 01:15 UTC, the close is placed on hold."}
+    ],
+    "reference": "The tolerance is $50,000 per cash account per day. A larger difference is recorded as a reconciliation break and escalated to Finance Control, and if a break above the tolerance is still open at 01:15 UTC the close is placed on hold, which stops publication of gl.daily_balances."
+  },
+  {
+    "id": "alco_hedge_treasury",
+    "query": "What hedge did ALCO approve to reduce EVE sensitivity?",
+    "groups": ["treasury"],
+    "relevant": [
+      {"doc_id": "alco_funding_strategy", "quote": "ALCO approved an increase of $1.5 billion notional in pay-fixed interest rate swaps with a 5-year tenor, executed in three tranches before 15 December 2026."},
+      {"doc_id": "alco_funding_strategy", "quote": "The hedge is expected to reduce the parallel up EVE decline from 11.1 percent to about 8.9 percent of Tier 1 capital."}
+    ],
+    "reference": "ALCO approved $1.5 billion notional of 5-year pay-fixed interest rate swaps, executed in three tranches before 15 December 2026, expected to cut the parallel up EVE decline from 11.1 percent to about 8.9 percent of Tier 1 capital."
+  },
+  {
+    "id": "alco_hedge_risk",
+    "query": "What hedge did ALCO approve to reduce EVE sensitivity?",
+    "groups": ["risk"],
+    "relevant": [
+      {"doc_id": "alco_funding_strategy", "quote": "ALCO approved an increase of $1.5 billion notional in pay-fixed interest rate swaps with a 5-year tenor, executed in three tranches before 15 December 2026."},
+      {"doc_id": "alco_funding_strategy", "quote": "The hedge is expected to reduce the parallel up EVE decline from 11.1 percent to about 8.9 percent of Tier 1 capital."}
+    ],
+    "reference": "The documents available to this user do not describe an ALCO hedging decision."
+  },
+  {
+    "id": "liquidity_deadline",
+    "query": "When must the daily liquidity monitoring report be submitted and what happens if it will be late?",
+    "groups": ["data-eng"],
+    "relevant": [
+      {"doc_id": "regulatory_reporting", "quote": "The daily liquidity monitoring report must be submitted to the supervisor by 12:00 local time on the next business day."},
+      {"doc_id": "regulatory_reporting", "quote": "If a report cannot be submitted by its deadline, the regulatory reporting manager must notify the supervisor before the deadline passes, stating the cause and the expected submission time."},
+      {"doc_id": "regulatory_reporting", "quote": "A late submission is recorded as a regulatory breach in the compliance register."}
+    ],
+    "reference": "It is due by 12:00 local time on the next business day. If it will be late, the regulatory reporting manager must notify the supervisor before the deadline with the cause and the expected submission time, and the late submission is recorded as a regulatory breach."
+  },
+  {
+    "id": "schema_owner",
+    "query": "Who owns the settled transactions schema and how much notice is required for schema changes?",
+    "groups": ["sre"],
+    "relevant": [
+      {"doc_id": "payments_platform", "quote": "Payments Engineering owns the schema of settlement.settled_transactions."},
+      {"doc_id": "payments_platform", "quote": "Any schema change requires at least 10 business days of notice to registered consumers through the data contract process."}
+    ],
+    "reference": "Payments Engineering owns the schema, and any change needs at least 10 business days of notice to registered consumers through the data contract process."
+  },
+  {
+    "id": "incident_root_cause",
+    "query": "What was the root cause of the $2.3 million reconciliation break?",
+    "groups": ["finance"],
+    "relevant": [
+      {"doc_id": "incident_inc_2291", "quote": "The root cause of the $2.3 million reconciliation break was the missing settlements, not an accounting error."},
+      {"doc_id": "incident_inc_2291", "quote": "A release of the payments hub added the column fx_rate_source to the settlement file."},
+      {"doc_id": "incident_inc_2291", "quote": "The change was not registered through the data contract process, so the warehouse schema was not updated and consumers were not notified."}
+    ],
+    "reference": "A payments hub release added an unregistered column, fx_rate_source, to the settlement file, so the nightly load rejected the file and 312,000 settlements were missing from the warehouse. The break came from those missing settlements, not from an accounting error."
+  }
+]

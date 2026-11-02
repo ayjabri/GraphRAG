@@ -1,13 +1,20 @@
 # GraphRAG
 
-A small, self-contained comparison of **Traditional RAG** and **Graph RAG** on a toy
-corpus of services and tables, implemented as three classes in [main.py](main.py):
+A small, self-contained comparison of **Traditional RAG** and **Graph RAG** over a synthetic
+corpus of banking and Treasury documents in [docs/](docs/), implemented as three classes in
+[main.py](main.py). Documents are split into chunks; chunks are what gets retrieved, while
+permissions and graph relationships stay at the document level.
 
-| Class               | What it does                                                               |
-| ------------------- | -------------------------------------------------------------------------- |
-| `TraditionalRAG`    | TF-IDF top-k over everything. No permissions, no graph, no citation check. |
-| `GraphRAG`          | ACL filter, BM25 + TF-IDF fused with RRF, graph walk, citation check.      |
-| `EmbeddingGraphRAG` | `GraphRAG`, but the dense step uses an Ollama embedding model.             |
+| Class               | What it does                                                                  |
+| ------------------- | ----------------------------------------------------------------------------- |
+| `TraditionalRAG`    | Chunks documents; TF-IDF top-k chunks. No permissions, no graph.              |
+| `GraphRAG`          | ACL filter, BM25 + TF-IDF over chunks fused with RRF, document graph walk.    |
+| `EmbeddingGraphRAG` | `GraphRAG`, but the dense step uses Ollama embeddings per chunk (FAISS).      |
+
+The step-by-step sections below say "document" for the retrieval unit; read it as "chunk".
+Since chunking was added, the rankings, RRF and seeds are all over chunks, and the graph walk
+adds the best-matching chunk of each document it reaches (see
+[Documents and chunking](#documents-and-chunking)).
 
 ## How `TraditionalRAG` works
 
@@ -229,15 +236,21 @@ reached, in discovery order: seeds map to `"seed"`, and every discovered documen
 `"hop{n}:{from}-{relationship}->{doc}"`, where `~` marks an edge followed in reverse.
 `predict` uses its keys as the evidence and returns it as `provenance`.
 
-Example with group `sre`, `hops=2` and seed `tbl_payments`:
+With chunks, the walk moves between documents (edges link documents) and adds only the
+best-matching chunk of each newly reached document (`hop_chunks`, default 1). Each provenance
+entry also records the chunk's document, section and character span. Example for group `sre`
+and the default query:
 
 ```python
 {
-    "tbl_payments":  "seed",
-    "svc_ledger":    "hop1:tbl_payments-~DEPENDS_ON->svc_ledger",
-    "svc_reporting": "hop2:svc_ledger-~DEPENDS_ON->svc_reporting",
+    "incident_inc_2291#c0": {"doc_id": "incident_inc_2291", "section": "Postmortem INC-2291: ...", "reason": "seed", ...},
+    "incident_inc_2291#c1": {"doc_id": "incident_inc_2291", "section": "Root cause", "reason": "seed", ...},
+    "general_ledger#c2":    {"doc_id": "general_ledger", "section": "Dependencies", "reason": "seed", ...},
+    "payments_platform#c1": {"doc_id": "payments_platform", "section": "Nightly settlement load",
+                             "reason": "hop1:incident_inc_2291-ABOUT->payments_platform",
+                             "relation": "incident_inc_2291 ABOUT payments_platform", ...},
 }
-# trace: "hop1: dropped pm_payments via ~ABOUT (not entitled)"  (pm_payments is finance-only)
+# trace: "hop1: dropped irrbb_measurement via ~DEPENDS_ON (not entitled)"
 ```
 
 ## Setup
@@ -266,43 +279,99 @@ python main.py                                    # GraphRAG as user group 'sre'
 python main.py --model traditional                # TraditionalRAG
 python main.py --model ollama                     # host and embed model come from .env
 python main.py --model graph --groups sre finance --query "your question"
+python main.py --save                             # build and save the index to VDB/
+python main.py --load                             # answer from VDB/ (refused if docs/ changed)
+python main.py --docs path/to/other/docs          # use another document folder
+python main.py --model graph --eval               # evaluation on docs/evals.json (see below)
 python main.py -h                                 # all options
-python main.py --model graph --eval               # retrieval metrics on EVAL_SET (no LLM)
 ```
 
-## Retrieval evaluation
+## Documents and chunking
 
-`calc_metric(query, relevant, groups, k=None)` scores retrieval for one labelled query without
-calling the LLM. `EVAL_SET` in `main.py` is a small, hand-labelled set: each item has a query, the
-user's groups, and the documents a person judged relevant. Only relevant documents those groups may
-read count as the target; retrieved documents they may not read are reported as `leaked`.
+Source data lives in `docs/` and is loaded by `load_corpus()`; generated indexes live in `VDB/`.
+Adding or replacing a document needs no code change: add the file and an entry in
+`metadata.json`.
 
-| Stage      | Defined in       | Classes          | Metrics                                            |
-| ---------- | ---------------- | ---------------- | -------------------------------------------------- |
-| `dense`    | `TraditionalRAG` | all three        | Precision@K, Recall@K, MRR, NDCG@K, leaks          |
-| `bm25`     | `GraphRAG`       | Graph, Embedding | Precision@K, Recall@K, MRR, NDCG@K, leaks          |
-| `rrf`      | `GraphRAG`       | Graph, Embedding | Precision@K, Recall@K, MRR, NDCG@K, leaks          |
-| `evidence` | `GraphRAG`       | Graph, Embedding | Precision, Recall, leaks (unordered set, no rank metrics) |
-
-Retrieval latency covers `fit()` (plus RRF and the graph walk in `GraphRAG`), never LLM generation.
-`EmbeddingGraphRAG` inherits `GraphRAG.calc_metric()` unchanged; its `dense` stage is the embedding
-ranking. `evaluate(model_cls)` runs the whole set and returns a Polars DataFrame:
-
-```python
-import polars as pl
-from main import evaluate, TraditionalRAG, GraphRAG
-
-scores = pl.concat([evaluate(TraditionalRAG), evaluate(GraphRAG)])
-scores.group_by("model", "stage").agg(pl.col("precision", "recall", "mrr", "ndcg").mean())
+```
+docs/
+├── metadata.json        # chunking settings + one entry per document: doc_id, file, title, owner, acl
+├── documents/*.md       # document text (synthetic banking and Treasury material, all fictional)
+├── edges.json           # document relationships: source, relationship, target, description
+└── evals.json           # labelled questions: id, query, groups, relevant passages, reference answer
 ```
 
-`python test_metrics.py` checks the metrics against hand-computed values.
+| Document                  | ACL                          | Topic                                         |
+| ------------------------- | ---------------------------- | --------------------------------------------- |
+| `deposit_behaviour_model` | treasury, risk               | Non-maturity deposit model, betas, run-off    |
+| `irrbb_measurement`       | treasury, risk, finance      | EVE / NII methodology and results             |
+| `payments_platform`       | sre, data-eng                | Settlement data and the nightly load          |
+| `general_ledger`          | finance, sre                 | Daily close and payment reconciliation        |
+| `regulatory_reporting`    | finance, data-eng, risk      | Liquidity / IRRBB returns and data lineage    |
+| `incident_inc_2291`       | sre, finance                 | Postmortem of a failed settlement load        |
+| `alco_funding_strategy`   | treasury                     | Confidential hedging and funding decisions    |
+
+**Chunking** (`TraditionalRAG.chunk_documents()` / `chunk_text()`, inherited by every class):
+
+- Sentence-aware: headings, list and table lines are units; prose is split into sentences. Only a
+  single unit longer than the chunk size is ever split mid-sentence.
+- Default `chunk_size` 400 and `overlap` 60, set in `metadata.json` (`"strategy": "document"`
+  keeps documents whole). Sizes count index tokens, the lowercase `\w+` words that TF-IDF and
+  BM25 use, so the size is exactly what the retriever sees.
+- A heading starts a new chunk (unless the current one is under a quarter full) and overlap is
+  never carried across a heading. On this corpus every section is under 400 tokens, so chunks
+  follow sections (27 chunks from 7 documents) and overlap only appears in longer sections.
+- Each chunk keeps `chunk_id` (`<doc_id>#c<position>`), `doc_id`, `position`, `text` (exactly
+  `document[start_char:end_char]`), `section`, `token_count`, `title`, `source` and the document's
+  `acl`. Provenance and LLM citations use the chunk ID, and every chunk traces back to its span.
+
+Evaluation labels are exact quotes (`{"doc_id", "quote"}`), not chunk IDs, so they survive changes
+to the chunk settings; `load_corpus()` fails if a quote no longer appears in its document.
+
+## Evaluation and monitoring
+
+`calc_metric(query, relevant, groups, k=None, reference=None, judge=None)` runs one request through
+`fit()` and `predict()`, exactly as production does, and returns one record with five sections:
+`retrieval`, `answer`, `security`, `performance` and `labels`. With labels it is an **offline
+evaluation**; with `relevant=None` and no reference it measures only what a live request can
+(**runtime monitoring**). `evaluate()` runs `EVAL_SET` (hand-labelled queries, groups, relevant
+documents and verified reference answers), and `report()` turns the records into four Polars tables.
+
+```bash
+python main.py -m graph -e                      # retrieval, latency, security; no LLM calls
+python main.py -m graph -e --llm                # also generate answers (tokens, cost, answer metrics)
+python main.py -m graph -e --llm --judge        # also LLM-judge faithfulness, correctness, relevance
+python main.py -m ollama -e --repeats 20        # more requests for steadier P95
+```
+
+| Metric | Needs | Monitor | Classes / stages |
+| --- | --- | --- | --- |
+| Precision@K, Recall@K, NDCG@K, MRR | relevance labels | offline, per release | all; `dense`, `context`; Graph adds `bm25`, `rrf` (MRR/NDCG ranked stages only) |
+| Answer token F1 | reference answer | offline | all, with `--llm` |
+| Judge correctness | reference + LLM judge | offline | all, with `--llm --judge` |
+| Judge faithfulness, judge context relevance | LLM judge | continuously, on a sample | all |
+| Lexical support (hallucination alarm) | nothing | continuously | all, with `--llm` |
+| P50 / P95 retrieval and end-to-end latency | telemetry | continuously | all |
+| Error and timeout rates | telemetry | continuously | all |
+| Input / output tokens, API cost | provider usage + price table | continuously | all, with `--llm` |
+| Unauthorized documents in retrieval or LLM context | ACLs only | continuously, target 0 | all |
+
+- `TraditionalRAG.calc_metric()` holds everything shared. `GraphRAG.calc_metric()` calls `super()`
+  and adds the `bm25` and `rrf` stages. `EmbeddingGraphRAG` inherits it unchanged.
+- The `context` stage is what the LLM receives: top-K for `TraditionalRAG`, seeds plus graph
+  neighbours for the graph classes. It is unranked, so it has precision, recall and leaks only.
+- Judge scores are LLM estimates, kept under `answer.judge`; everything else is deterministic.
+  A citation-ID check alone is not faithfulness.
+- Missing values are `None`, never a misleading 0: unpriced (self-hosted) models have no cost,
+  unlabelled requests have no precision, and failed judge calls are listed in `answer.judge.errors`.
+- API prices live in `LLM_PRICES_PER_MTOK`; Ollama models are self-hosted and unpriced.
+
+`python test_metrics.py` checks every metric against hand-computed values, using fake LLM, judge
+and Ollama objects (no network).
 
 ## Persisted index (`VDB/`)
 
-`GraphRAG` can save its query-independent indexes and load them back without retokenizing
-anything. Each part uses a format that suits it, much like a search engine keeps its inverted
-index, vectors, metadata and document store apart.
+`GraphRAG` and `EmbeddingGraphRAG` save their query-independent indexes and load them back
+without rechunking, retokenizing or re-embedding anything. Each part uses a format that suits it.
 
 ```python
 from main import DOCS, EDGES, GraphRAG, VDB_PATH
@@ -312,25 +381,34 @@ rag = GraphRAG(None, None, ["sre"], use_llm=False, index_path=VDB_PATH)  # loads
 rag.fit("payments table failure").predict()
 ```
 
-| File                     | Format  | Contents                                             | Restores                     |
-| ------------------------ | ------- | ---------------------------------------------------- | ---------------------------- |
-| `bm25_postings.parquet`  | Parquet | `term`, `doc_id`, `tf` (inverted index)              | `bm25_tf`                    |
-| `bm25_documents.parquet` | Parquet | `doc_id`, `doc_len`                                  | `bm25_doc_len`               |
-| `bm25_stats.parquet`     | Parquet | `term`, `df`, `n_docs`, `avg_doc_len`                | `bm25_idf`, `avg_len`        |
-| `tfidf.npz`              | SciPy   | CSR matrix, rows = documents, columns = vocabulary   | `doc_vectors`                |
-| `metadata.json`          | JSON    | `doc_ids`, `vocab` (term -> column), `tfidf_idf`, `config` | `vocab`, `tfidf_idf`, ordering |
-| `documents.json`         | JSON    | `doc_id` -> `text`, `acl` (list of groups)          | `docs`                       |
-| `graph.json`             | JSON    | directed edges as `[source, relationship, target]`   | `edges`, `adj`               |
+| File                          | Format  | Contents                                                      | Restores                     |
+| ----------------------------- | ------- | ------------------------------------------------------------- | ---------------------------- |
+| `metadata.json`               | JSON    | `doc_ids`, `chunk_ids`, config (incl. chunking), source fingerprint | ordering, freshness check |
+| `documents.json`              | JSON    | `doc_id` -> text, ACL groups, title, file                      | `docs`                       |
+| `chunks.parquet`              | Parquet | `chunk_id`, `doc_id`, `position`, char span, `section`, text   | `chunks`, `doc_chunks`       |
+| `graph.json`                  | JSON    | directed document edges `[source, relationship, target]`       | `edges`, `adj`               |
+| `bm25_postings.parquet`       | Parquet | `term`, `chunk_id`, `tf` (inverted index)                      | `bm25_tf`                    |
+| `bm25_chunks.parquet`         | Parquet | `chunk_id`, `chunk_len`                                        | `bm25_chunk_len`             |
+| `bm25_stats.parquet`          | Parquet | `term`, `df`, `n_chunks`, `avg_chunk_len`                      | `bm25_idf`, `avg_len`        |
+| `graph/tfidf.npz`             | SciPy   | CSR matrix, rows = chunks, columns = vocabulary (GraphRAG only) | `chunk_vectors`             |
+| `graph/tfidf_metadata.json`   | JSON    | `chunk_ids`, `vocab`, `tfidf_idf`                              | `vocab`, `tfidf_idf`         |
+| `embedding/embeddings.faiss`  | FAISS   | one normalized row per chunk (EmbeddingGraphRAG only)          | `faiss_index`                |
+| `embedding/embeddings_metadata.json` | JSON | row -> `chunk_id`, embedding model, dimension             | `faiss_chunk_ids`            |
 
-BM25 IDF is not stored: it is recomputed from `df` and `n_docs`. Reverse graph links are
-rebuilt from the directed edges.
+- **Stale indexes are refused.** `metadata.json` stores a SHA-256 of every document's text and
+  ACL, of the edges, and the chunking settings. Loading compares them with the current source
+  (`docs/`, or the `docs`/`edges` passed in) and raises an error naming the changed, added or
+  removed documents. Rebuild with `python main.py --save`.
+- Chunk ACLs are re-inherited from `documents.json` on load, so a chunk can never carry a
+  different ACL from its document. BM25 IDF is recomputed from `df`; reverse graph links are
+  rebuilt from the directed edges.
 
-Inspect the BM25 files with Polars or DuckDB:
+Inspect the files with Polars or DuckDB:
 
 ```python
 import polars as pl
 
-df = pl.read_parquet("VDB/bm25_postings.parquet")
+df = pl.read_parquet("VDB/chunks.parquet")
 ```
 
 ```python
@@ -343,19 +421,22 @@ df = duckdb.sql("""
 ```
 
 `python test_index_persistence.py` builds, queries, saves, reloads and checks that scores,
-rankings, ACL results and graph evidence are identical.
+rankings, ACL results and graph evidence are identical, that FAISS rows map to the right chunks
+with no re-embedding, and that stale indexes are refused.
 
 ## Project layout
 
 ```
-main.py         # corpus, the three RAG classes, and the CLI
-test_index_persistence.py  # save_index / load_index round-trip test
-test_metrics.py            # calc_metric() checks against hand-computed values
-VDB/            # index written by GraphRAG.save_index() (Parquet, NPZ, JSON)
-pyproject.toml  # packaging, dependencies, ruff config
-.env.example    # template for local settings (copy to .env)
-.vscode/        # shared editor settings (loads .env into the integrated terminal)
-LICENSE         # MIT
+main.py                    # corpus loader, the three RAG classes, evaluation and the CLI
+docs/                      # source documents, ACLs, edges and evaluation set (see above)
+test_chunking.py           # chunk boundaries, overlap, metadata, deterministic IDs
+test_index_persistence.py  # save_index / load_index round trip and stale-index checks
+test_metrics.py            # calc_metric(), ACLs, citations, relevance, before/after chunking
+VDB/                       # generated index (Parquet, NPZ, JSON, FAISS); git-ignored
+pyproject.toml             # packaging, dependencies, ruff config
+.env.example               # template for local settings (copy to .env)
+.vscode/                   # shared editor settings (loads .env into the integrated terminal)
+LICENSE                    # MIT
 ```
 
 ## Branches
@@ -371,9 +452,11 @@ and reaches `main` through a pull request.
 
 ## Status
 
-Working prototype on a five-document toy corpus. `GraphRAG.fit_predict` runs end to end with
-`use_llm=False` and returns a grounded answer for the default query; the LLM path and
-`EmbeddingGraphRAG` have not been re-checked since the latest refactors. Recent structural changes:
+Working prototype on seven synthetic banking documents (27 chunks) in `docs/`. All three
+classes run end to end, with and without the LLM. Recent structural changes:
+
+- Documents, ACLs, edges and the evaluation set moved from `main.py` into `docs/`.
+- Retrieval is chunk-level (sentence-aware, 400 / 60 tokens); ACLs and graph edges stay document-level.
 
 - Pure helpers (`tokenize`, `build_tfidf_idf`, `vec`, `cosine`, `_rank`, `build_bm25_idf`, `get_llm`) are `@staticmethod`s.
 - The LLM is built once in `__launch__` as `self._llm` and used by `llm_answer`.
@@ -387,13 +470,14 @@ Working prototype on a five-document toy corpus. `GraphRAG.fit_predict` runs end
 
 Known gaps:
 
-- **No tests or CI.** The ACL filter, graph hops, RRF fusion and both IDF functions are the first candidates.
+- **No CI.** Tests run locally with `python test_*.py` or `pytest`.
 - **Provider selection.** The CLI has no `--provider` flag; the provider comes from `PROVIDER` in `main.py`, and the `use_llm` default differs for `EmbeddingGraphRAG` (off) versus the other two (on).
 - **Permission leaks in the audit trace.** It lists IDs of documents the user may not see, and IDF statistics include restricted documents.
-- **Weak citation check.** It verifies that cited IDs exist in the context, not that claims are supported, and its regex ignores IDs containing `-` or `.`.
+- **Weak citation check.** It verifies that cited chunk or document IDs exist in the context, not that claims are supported.
 - **`GraphRAG` requires `edges`.** Passing `None` raises an error.
-- **Performance.** Document vectors are dense lists over the whole vocabulary, and the graph walk has no context cap. `EmbeddingGraphRAG` still builds TF-IDF document vectors it never uses.
-- **Tiny evaluation set.** `EVAL_SET` has six queries; on this corpus BM25 and TF-IDF produce the same rankings, so their metrics match.
+- **Performance.** Chunk vectors are dense lists over the whole vocabulary, and the graph walk has no context cap. `EmbeddingGraphRAG` still builds TF-IDF chunk vectors it never uses.
+- **Small evaluation set.** `docs/evals.json` has 12 labelled questions; one question changes the averages noticeably.
+- **Graph walk takes one chunk per document.** With `hop_chunks=1` it can pick a neighbour's wrong section; `hop_chunks=2` raised context recall from 0.89 to 0.92 for 31% more context.
 
 ## License
 

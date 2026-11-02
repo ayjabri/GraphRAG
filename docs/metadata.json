@@ -1,0 +1,59 @@
+{
+  "corpus": "Synthetic banking and Treasury documents. All names, figures and events are fictional.",
+  "chunking": {
+    "strategy": "sentence",
+    "chunk_size": 400,
+    "overlap": 60
+  },
+  "documents": [
+    {
+      "doc_id": "deposit_behaviour_model",
+      "file": "documents/deposit_behaviour_model.md",
+      "title": "Non-Maturity Deposit Behavioural Model",
+      "owner": "Treasury ALM",
+      "acl": ["treasury", "risk"]
+    },
+    {
+      "doc_id": "irrbb_measurement",
+      "file": "documents/irrbb_measurement.md",
+      "title": "IRRBB Measurement Methodology: EVE and NII",
+      "owner": "Market Risk",
+      "acl": ["treasury", "risk", "finance"]
+    },
+    {
+      "doc_id": "payments_platform",
+      "file": "documents/payments_platform.md",
+      "title": "Payments Platform and Settlement Data",
+      "owner": "Payments Engineering",
+      "acl": ["sre", "data-eng"]
+    },
+    {
+      "doc_id": "general_ledger",
+      "file": "documents/general_ledger.md",
+      "title": "General Ledger Close and Payment Reconciliation",
+      "owner": "Finance Control",
+      "acl": ["finance", "sre"]
+    },
+    {
+      "doc_id": "regulatory_reporting",
+      "file": "documents/regulatory_reporting.md",
+      "title": "Regulatory Reporting and Data Lineage",
+      "owner": "Regulatory Reporting",
+      "acl": ["finance", "data-eng", "risk"]
+    },
+    {
+      "doc_id": "incident_inc_2291",
+      "file": "documents/incident_inc_2291.md",
+      "title": "Postmortem INC-2291: Failed Nightly Settlement Load",
+      "owner": "Site Reliability Engineering",
+      "acl": ["sre", "finance"]
+    },
+    {
+      "doc_id": "alco_funding_strategy",
+      "file": "documents/alco_funding_strategy.md",
+      "title": "ALCO Funding and Hedging Strategy: Q4 2026",
+      "owner": "Group Treasurer",
+      "acl": ["treasury"]
+    }
+  ]
+}

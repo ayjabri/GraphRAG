@@ -1,0 +1,20 @@
+[
+  {"source": "general_ledger", "relationship": "DEPENDS_ON", "target": "payments_platform",
+   "description": "Payment reconciliation reads settlement.settled_transactions before the ledger close."},
+  {"source": "irrbb_measurement", "relationship": "DEPENDS_ON", "target": "general_ledger",
+   "description": "The IRRBB engine reads position balances from gl.daily_balances."},
+  {"source": "irrbb_measurement", "relationship": "DEPENDS_ON", "target": "deposit_behaviour_model",
+   "description": "The IRRBB engine reads behavioural deposit profiles from alm.nmd_profiles."},
+  {"source": "regulatory_reporting", "relationship": "DEPENDS_ON", "target": "general_ledger",
+   "description": "Liquidity reports are built from gl.daily_balances."},
+  {"source": "regulatory_reporting", "relationship": "DEPENDS_ON", "target": "irrbb_measurement",
+   "description": "The quarterly IRRBB return uses irrbb.eve_nii_results."},
+  {"source": "incident_inc_2291", "relationship": "ABOUT", "target": "payments_platform",
+   "description": "The incident was a failure of stl_nightly_load."},
+  {"source": "incident_inc_2291", "relationship": "IMPACTED", "target": "general_ledger",
+   "description": "The incident caused a reconciliation break and a close hold."},
+  {"source": "alco_funding_strategy", "relationship": "USES", "target": "irrbb_measurement",
+   "description": "ALCO hedging decisions use EVE and NII results."},
+  {"source": "alco_funding_strategy", "relationship": "USES", "target": "deposit_behaviour_model",
+   "description": "ALCO deposit pricing decisions use repricing betas."}
+]
