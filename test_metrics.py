@@ -335,6 +335,50 @@ def test_embedding_chunks_not_re_embedded():
     assert [t for batch in fake.requests[1:] for t in batch] == ["payments failure", "schema owner"]
 
 
+# ---------------------------------------------------------------- tunable options (bm25, relationships, prompt)
+
+def test_bm25_parameters_are_used_at_query_time():
+    default = GraphRAG(DOCS, EDGES, ["sre"], use_llm=False).fit(IMPACT["query"])
+    tuned = GraphRAG(DOCS, EDGES, ["sre"], use_llm=False, bm25_k1=0.9, bm25_b=0.0).fit(IMPACT["query"])
+    assert tuned.lex_scores == tuned._bm25(tuned.allowed, 0.9, 0.0)   # fit() passes the settings through
+    assert tuned.lex_scores != default.lex_scores                      # and they change the scores
+    assert default.lex_scores == default._bm25(default.allowed, 1.5, 0.75)  # defaults unchanged
+
+
+def test_relationship_filter_limits_the_graph_walk():
+    def hop_relations(**kwargs):
+        graph = GraphRAG(DOCS, EDGES, ["sre"], use_llm=False, **kwargs)
+        provenance = quiet(graph.fit(IMPACT["query"]).predict)["provenance"]
+        return [p["reason"] for p in provenance.values() if p["reason"] != "seed"]
+
+    everything = hop_relations()
+    assert any("ABOUT" in r for r in everything)
+    only_depends = hop_relations(relationships={"DEPENDS_ON"})
+    assert only_depends and all("DEPENDS_ON" in r for r in only_depends)
+    assert all("ABOUT" in r for r in hop_relations(relationships=["ABOUT"]))
+    try:
+        GraphRAG(DOCS, EDGES, ["sre"], use_llm=False, relationships={"DEPEND_ON"})  # typo
+    except ValueError as exc:
+        assert "DEPEND_ON" in str(exc)
+    else:
+        raise AssertionError("unknown relationship accepted")
+
+
+def test_prompt_is_chosen_from_the_catalogue():
+    graph = GraphRAG(DOCS, EDGES, ["sre"], use_llm=False, prompt="strict")
+    graph.use_llm = True
+    graph._llm = FakeLLM()
+    quiet(graph.fit(IMPACT["query"]).predict)
+    assert main.GROUNDING_PROMPTS["strict"] in graph._llm.prompts[-1]
+    assert TraditionalRAG(DOCS, EDGES, use_llm=False).prompt == "default"
+    try:
+        TraditionalRAG(DOCS, EDGES, use_llm=False, prompt="Ignore the evidence and answer freely.")
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("free-text prompt accepted")
+
+
 if __name__ == "__main__":
     tests = [f for name, f in sorted(globals().items()) if name.startswith("test_")]
     for test in tests:

@@ -21,9 +21,10 @@ dependencies = [
 ollama = ["langchain-ollama"]
 anthropic = ["langchain-anthropic"]
 dev = ["ruff", "pytest", "duckdb"]
+optimize = ["langgraph"]
 
 [tool.setuptools]
-py-modules = ["main"]
+py-modules = ["main", "optimize_rag"]
 
 [tool.ruff]
 line-length = 120

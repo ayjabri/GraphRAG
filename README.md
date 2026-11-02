@@ -368,6 +368,50 @@ python main.py -m ollama -e --repeats 20        # more requests for steadier P95
 `python test_metrics.py` checks every metric against hand-computed values, using fake LLM, judge
 and Ollama objects (no network).
 
+## Optimization agent (`optimize_rag.py`)
+
+`optimize_rag.py` tunes the retrieval configuration with a LangGraph loop. An LLM agent diagnoses
+weaknesses and proposes changes; deterministic rules decide whether to accept them. It reuses
+`GraphRAG` / `EmbeddingGraphRAG`, `calc_metric()`, `evaluate()` / `report()` and the persisted
+indexes, and does not modify `main.py`.
+
+```bash
+python optimize_rag.py --model graph --max-iterations 5 --recall-target 0.95 --max-p95-latency-ms 500
+python optimize_rag.py --model embedding --precision-target 0.3 --verbose
+python optimize_rag.py --model graph --grounding-target 0.98      # also generates and judges answers (slow)
+python optimize_rag.py --model graph --no-agent                    # rule-based proposals only, no LLM
+python optimize_rag.py -h                                          # all options
+```
+
+```
+load_baseline -> evaluate_baseline -> diagnose -> propose -> prepare_index -> evaluate_candidate
+              -> compare -> decide -> (stop? finalize : diagnose)
+```
+
+- **Tunable** (constructor arguments of the RAG classes only): `chunk_strategy`, `chunk_size`,
+  `overlap` (rebuild the index); `top_k`, `rrf_k`, `hops`, `hop_chunks`, `bm25_k1`, `bm25_b`,
+  `relationships` (edge types the graph walk follows) and `prompt` (reuse it). `prompt` picks a
+  name from the human-written `GROUNDING_PROMPTS` in `main.py` and is only tuned when answers are
+  generated (`--grounding-target`). Reranking and the embedding model are reported as not tunable.
+- **Acceptance** needs every gate: no ACL violations, no errors or timeouts, retrieval P95 within
+  the limit, a tuning-score gain of at least `--min-improvement`, and no held-out drop beyond
+  `--holdout-tolerance`. The score weights context recall 0.5, RRF NDCG 0.2, context precision 0.2
+  and judge grounding 0.1 (when measured).
+- **Stops** when all targets are met on both sets, after `--max-iterations`, after 2 iterations
+  without an accepted candidate, when the time or cost budget runs out, or on any ACL violation.
+- **Safeguards**: a third of the questions are held out by a stable hash of their ID and never
+  shown to the agent. The agent sees metrics, configurations and question IDs, never question,
+  answer or document text. Proposals are validated against `PARAM_SPACE`. Indexes are built only
+  inside a versioned run folder, `optimization_runs/<timestamp>-<model>/`, with write-once records.
+  The production index is opened read-only and hashed before and after the run.
+- **Output**: per-iteration changes, rationale, metric deltas, gates and decision; then
+  `report.json` with every experiment, the baseline vs best comparison, remaining deficiencies and a
+  deployment plan marked `NOT DEPLOYED`. Applying it, and rolling back to the recorded baseline, is
+  a human step.
+
+`python test_optimize_rag.py` checks validation, the split, scoring, gates, stopping rules,
+isolation, the agent payload and full LangGraph runs with a fake agent.
+
 ## Persisted index (`VDB/`)
 
 `GraphRAG` and `EmbeddingGraphRAG` save their query-independent indexes and load them back
@@ -432,6 +476,9 @@ docs/                      # source documents, ACLs, edges and evaluation set (s
 test_chunking.py           # chunk boundaries, overlap, metadata, deterministic IDs
 test_index_persistence.py  # save_index / load_index round trip and stale-index checks
 test_metrics.py            # calc_metric(), ACLs, citations, relevance, before/after chunking
+optimize_rag.py            # LangGraph optimization agent (does not modify main.py)
+test_optimize_rag.py       # optimizer tests with a fake agent
+optimization_runs/         # optimizer run folders; git-ignored
 VDB/                       # generated index (Parquet, NPZ, JSON, FAISS); git-ignored
 pyproject.toml             # packaging, dependencies, ruff config
 .env.example               # template for local settings (copy to .env)

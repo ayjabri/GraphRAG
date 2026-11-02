@@ -36,3 +36,6 @@ Thumbs.db
 
 # Generated index files (GraphRAG.save_index)
 VDB/
+
+# Optimizer experiment folders (optimize_rag.py)
+optimization_runs/
