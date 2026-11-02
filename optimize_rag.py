@@ -5,14 +5,15 @@ The loop is: evaluate -> diagnose weaknesses (LLM) -> propose a configuration ch
 -> accept or reject (deterministic rules) -> repeat or stop.
 
 The LLM only suggests. Every proposal is checked against PARAM_SPACE, every decision is made by
-code, experiments live in a versioned folder under --output-path, and the production index in
---index-path is opened read-only. Nothing is deployed: the run ends with a plan for a human.
+code, experiments live in a versioned folder under output_path, and the production index in
+index_path is opened read-only. Nothing is deployed: the run ends with a plan for a human.
+
+All settings (model, targets, budgets, paths, agent provider) live in one JSON file, by default
+docs/optimize.json next to the documents. See DEFAULT_CONFIG for every key.
 
 Run:
-  python optimize_rag.py --model graph --max-iterations 5 --recall-target 0.95 --max-p95-latency-ms 500
-  python optimize_rag.py --model embedding --recall-target 0.95 --precision-target 0.4
-  python optimize_rag.py --model graph --grounding-target 0.98      # also generates and judges answers
-  python optimize_rag.py --model graph --no-agent --verbose          # rule-based proposals only, no LLM
+  python optimize_rag.py                                   # settings from docs/optimize.json
+  python optimize_rag.py --config my_settings.json -v    # another settings file
 """
 
 import argparse
@@ -36,6 +37,34 @@ import main
 MODELS = {"graph": main.GraphRAG, "embedding": main.EmbeddingGraphRAG}
 OUTPUT_PATH = Path(__file__).resolve().parent / "optimization_runs"
 MAX_ITERATIONS = 20
+CONFIG_PATH = main.DOCS_PATH / "optimize.json"
+
+# Settings read from the config file; a key missing from the file takes this value. Relative
+# paths are resolved against the config file's folder. agent_provider null = rule-based
+# proposals only (no agent LLM calls). A grounding target generates and judges answers (slow).
+DEFAULT_CONFIG = {
+    "model": "graph",                  # "graph" or "embedding"
+    "max_iterations": 5,               # candidate experiments, 1-MAX_ITERATIONS
+    "docs": ".",                       # source document folder
+    "eval_path": "evals.json",         # evaluation questions
+    "index_path": "../VDB",            # production index, read-only
+    "output_path": "../optimization_runs",  # parent folder for run folders
+    "targets": {
+        "context_recall": 0.95,        # minimum context recall
+        "context_precision": None,     # minimum context precision
+        "rrf_ndcg": None,              # minimum RRF NDCG@K
+        "grounding": None,             # minimum judge faithfulness
+        "retrieval_p95_ms": None,      # maximum retrieval P95 latency
+    },
+    "min_improvement": 0.005,          # smallest meaningful score gain
+    "holdout_fraction": 0.34,          # share of questions held out
+    "holdout_tolerance": 0.02,         # allowed held-out drop
+    "repeats": 3,                      # runs per question per evaluation (latency)
+    "time_budget_s": 3600,             # wall-clock budget
+    "cost_budget_usd": None,           # budget for known API spend
+    "agent_provider": main.PROVIDER,   # LLM for diagnosis/proposals, or null
+    "allow_external_llm": False,       # let a non-Ollama provider generate/judge answers
+}
 NO_IMPROVEMENT_LIMIT = 2
 
 # Everything the agent may change, with bounds. These map 1:1 to existing constructor arguments
@@ -304,7 +333,7 @@ class RAGOptimizer:
                 errors.append(f"{name}: not a tunable parameter")
                 continue
             if spec.get("needs_answers") and not with_answers:
-                errors.append(f"{name}: only affects generated answers; run with --grounding-target")
+                errors.append(f"{name}: only affects generated answers; set a grounding target")
                 continue
             if "choices" in spec:
                 if value not in spec["choices"]:
@@ -980,62 +1009,91 @@ def load_eval_set(path, corpus):
     return evals
 
 
-def parse_args(argv=None):
-    p = argparse.ArgumentParser(description="Self-improving retrieval optimizer for GraphRAG (LangGraph).")
-    p.add_argument("-m", "--model", choices=MODELS, default="graph", help="graph or embedding (default: graph)")
-    p.add_argument("--max-iterations", type=int, default=5, help=f"candidate experiments, 1-{MAX_ITERATIONS} (default: 5)")
-    p.add_argument("--docs", default=main.DOCS_PATH, help="source document folder (default: docs/)")
-    p.add_argument("--eval-path", default=None, help="evaluation questions (default: <docs>/evals.json)")
-    p.add_argument("--index-path", default=main.VDB_PATH, help="production index, read-only (default: VDB/)")
-    p.add_argument("--output-path", default=OUTPUT_PATH, help="parent folder for run folders")
-    p.add_argument("--recall-target", type=float, default=0.95, help="minimum context recall (default: 0.95)")
-    p.add_argument("--precision-target", type=float, default=None, help="minimum context precision")
-    p.add_argument("--ndcg-target", type=float, default=None, help="minimum RRF NDCG@K")
-    p.add_argument("--grounding-target", type=float, default=None,
-                   help="minimum judge faithfulness; generates and judges answers (slow)")
-    p.add_argument("--max-p95-latency-ms", type=float, default=None, help="maximum retrieval P95 latency")
-    p.add_argument("--min-improvement", type=float, default=0.005, help="smallest meaningful score gain")
-    p.add_argument("--holdout-fraction", type=float, default=0.34, help="share of questions held out")
-    p.add_argument("--holdout-tolerance", type=float, default=0.02, help="allowed held-out drop")
-    p.add_argument("--repeats", type=int, default=3, help="runs per question per evaluation (latency)")
-    p.add_argument("--time-budget-s", type=float, default=3600, help="wall-clock budget in seconds")
-    p.add_argument("--cost-budget-usd", type=float, default=None, help="budget for known API spend")
-    p.add_argument("--agent-provider", choices=main.LLM_MODELS, default=main.PROVIDER,
-                   help=f"LLM provider for diagnosis/proposals (default: {main.PROVIDER})")
-    p.add_argument("--no-agent", action="store_true", help="rule-based proposals only; no agent LLM calls")
-    p.add_argument("--allow-external-llm", action="store_true",
-                   help="allow a non-Ollama provider to generate or judge answers (sends questions and chunks)")
-    p.add_argument("-v", "--verbose", action="store_true", help="print diagnoses, proposals, per-question metrics")
-    args = p.parse_args(argv)
-    if not 1 <= args.max_iterations <= MAX_ITERATIONS:
-        p.error(f"--max-iterations must be between 1 and {MAX_ITERATIONS}")
-    if args.grounding_target is not None and main.PROVIDER != "ollama" and not args.allow_external_llm:
-        p.error(f"--grounding-target sends questions and chunks to {main.PROVIDER}; add --allow-external-llm")
-    output_path = Path(args.output_path).resolve()
-    index_path = Path(args.index_path).resolve()
+def load_config(path=CONFIG_PATH):
+    """Read and validate the optimizer settings file.
+
+    Every key is optional; a missing key takes its value from
+    DEFAULT_CONFIG. Relative paths are resolved against the folder that
+    holds the settings file, so the file can live next to the documents.
+
+    Parameters
+    ----------
+    path : str or Path, default=CONFIG_PATH
+        JSON settings file (default: docs/optimize.json).
+
+    Returns
+    -------
+    dict
+        DEFAULT_CONFIG merged with the file, with absolute paths and a
+        complete ``targets`` block.
+
+    Raises
+    ------
+    ValueError
+        On an unknown key or target, a value out of range, a non-Ollama
+        provider judging answers without ``allow_external_llm``, or an
+        output folder inside the production index.
+    """
+    path = Path(path).resolve()
+    raw = json.loads(path.read_text(encoding="utf-8"))
+    unknown = sorted(raw.keys() - DEFAULT_CONFIG.keys())
+    if unknown:
+        raise ValueError(f"{path}: unknown settings {unknown}; allowed: {sorted(DEFAULT_CONFIG)}")
+    targets = raw.get("targets") or {}
+    unknown_targets = sorted(targets.keys() - DEFAULT_CONFIG["targets"].keys())
+    if unknown_targets:
+        raise ValueError(f"{path}: unknown targets {unknown_targets}; allowed: {sorted(DEFAULT_CONFIG['targets'])}")
+    config = {**DEFAULT_CONFIG, **raw}
+    config["targets"] = {**DEFAULT_CONFIG["targets"], **targets}
+    for key in ("docs", "eval_path", "index_path", "output_path"):
+        config[key] = (path.parent / config[key]).resolve()
+
+    if config["model"] not in MODELS:
+        raise ValueError(f"{path}: model must be one of {sorted(MODELS)}, not {config['model']!r}")
+    if not 1 <= config["max_iterations"] <= MAX_ITERATIONS:
+        raise ValueError(f"{path}: max_iterations must be between 1 and {MAX_ITERATIONS}")
+    if not 0 < config["holdout_fraction"] < 1:
+        raise ValueError(f"{path}: holdout_fraction must be between 0 and 1")
+    if config["repeats"] < 1:
+        raise ValueError(f"{path}: repeats must be at least 1")
+    if config["agent_provider"] is not None and config["agent_provider"] not in main.LLM_MODELS:
+        raise ValueError(f"{path}: agent_provider must be one of {sorted(main.LLM_MODELS)} or null")
+    grounding = config["targets"]["grounding"]
+    if grounding is not None and main.PROVIDER != "ollama" and not config["allow_external_llm"]:
+        raise ValueError(f"{path}: a grounding target sends questions and chunks to {main.PROVIDER}; "
+                         "set allow_external_llm to true")
+    index_path = config["index_path"]
+    output_path = config["output_path"]
     if output_path == index_path or index_path in output_path.parents:
-        p.error("--output-path must not be inside --index-path")
-    return args
+        raise ValueError(f"{path}: output_path must not be inside index_path")
+    return config
+
+
+def parse_args(argv=None):
+    p = argparse.ArgumentParser(description="Self-improving retrieval optimizer for GraphRAG (LangGraph). "
+                                            "All settings live in the JSON config file.")
+    p.add_argument("-c", "--config", default=CONFIG_PATH, help="settings file (default: docs/optimize.json)")
+    p.add_argument("-v", "--verbose", action="store_true", help="print diagnoses, proposals, per-question metrics")
+    return p.parse_args(argv)
 
 
 if __name__ == "__main__":
     args = parse_args()
-    corpus = main.load_corpus(args.docs)
-    eval_set = load_eval_set(args.eval_path or Path(args.docs) / "evals.json", corpus)
-    agent_llm = None if args.no_agent else main.TraditionalRAG.get_llm(args.agent_provider)
-    with_answers = args.grounding_target is not None
+    config = load_config(args.config)
+    corpus = main.load_corpus(config["docs"])
+    eval_set = load_eval_set(config["eval_path"], corpus)
+    provider = config["agent_provider"]
+    agent_llm = None if provider is None else main.TraditionalRAG.get_llm(provider)
+    agent_model = None if provider is None else main.LLM_MODELS[provider]
+    with_answers = config["targets"]["grounding"] is not None
     judge = main.TraditionalRAG.get_llm(main.PROVIDER) if with_answers else None
-    thresholds = {
-        "context_recall": args.recall_target, "context_precision": args.precision_target,
-        "rrf_ndcg": args.ndcg_target, "grounding": args.grounding_target,
-        "retrieval_p95_ms": args.max_p95_latency_ms,
-    }
     optimizer = RAGOptimizer(
-        model=args.model, corpus=corpus, eval_set=eval_set, index_path=args.index_path,
-        output_path=args.output_path, thresholds=thresholds, max_iterations=args.max_iterations,
-        min_improvement=args.min_improvement, holdout_fraction=args.holdout_fraction,
-        holdout_tolerance=args.holdout_tolerance, repeats=args.repeats, time_budget_s=args.time_budget_s,
-        cost_budget_usd=args.cost_budget_usd, agent_llm=agent_llm, agent_model=main.LLM_MODELS[args.agent_provider],
+        model=config["model"], corpus=corpus, eval_set=eval_set, index_path=config["index_path"],
+        output_path=config["output_path"], thresholds=config["targets"], max_iterations=config["max_iterations"],
+        min_improvement=config["min_improvement"], holdout_fraction=config["holdout_fraction"],
+        holdout_tolerance=config["holdout_tolerance"], repeats=config["repeats"],
+        time_budget_s=config["time_budget_s"], cost_budget_usd=config["cost_budget_usd"],
+        agent_llm=agent_llm, agent_model=agent_model,
         with_answers=with_answers, judge=judge, verbose=args.verbose,
     )
     optimizer.run()

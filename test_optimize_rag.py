@@ -279,15 +279,49 @@ def test_targets_met_at_baseline_stops_before_any_experiment():
         assert json.loads((opt.run_dir / "report.json").read_text(encoding="utf-8"))["experiments"] == []
 
 
-def test_cli_limits():
-    for argv in (["--max-iterations", "21"], ["--max-iterations", "0"],
-                 ["--index-path", "VDB", "--output-path", "VDB/runs"]):
-        with contextlib.redirect_stderr(io.StringIO()):
+def test_config_defaults_and_relative_paths():
+    with tempfile.TemporaryDirectory() as tmp:
+        path = Path(tmp) / "optimize.json"
+        path.write_text(json.dumps({"model": "embedding", "targets": {"context_precision": 0.3}}), encoding="utf-8")
+        config = optimize_rag.load_config(path)
+        assert config["model"] == "embedding"
+        assert config["targets"]["context_precision"] == 0.3
+        assert config["targets"]["context_recall"] == 0.95       # default kept inside targets
+        assert config["max_iterations"] == 5
+        assert config["eval_path"] == (Path(tmp) / "evals.json").resolve()
+        assert config["index_path"] == (Path(tmp).parent / "VDB").resolve()
+
+
+def test_shipped_config_is_valid():
+    config = optimize_rag.load_config()
+    assert config["docs"] == main.DOCS_PATH.resolve()
+    assert config["index_path"] == main.VDB_PATH.resolve()
+
+
+def test_config_limits():
+    bad = ({"max_iterations": 21}, {"max_iterations": 0}, {"model": "bm25"}, {"recall_target": 0.9},
+           {"targets": {"recall": 0.9}}, {"agent_provider": "openai"},
+           {"index_path": "VDB", "output_path": "VDB/runs"})
+    with tempfile.TemporaryDirectory() as tmp:
+        path = Path(tmp) / "optimize.json"
+        for settings in bad:
+            path.write_text(json.dumps(settings), encoding="utf-8")
             try:
-                optimize_rag.parse_args(argv)
-            except SystemExit:
+                optimize_rag.load_config(path)
+            except ValueError:
                 continue
-        raise AssertionError(f"accepted {argv}")
+            raise AssertionError(f"accepted {settings}")
+
+
+def test_cli_has_only_config_and_verbose():
+    args = optimize_rag.parse_args(["-c", "x.json", "-v"])
+    assert vars(args) == {"config": "x.json", "verbose": True}
+    with contextlib.redirect_stderr(io.StringIO()):
+        try:
+            optimize_rag.parse_args(["--max-iterations", "3"])
+        except SystemExit:
+            return
+    raise AssertionError("old flag accepted")
 
 
 if __name__ == "__main__":

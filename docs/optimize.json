@@ -1,0 +1,23 @@
+{
+  "model": "graph",
+  "max_iterations": 5,
+  "docs": ".",
+  "eval_path": "evals.json",
+  "index_path": "../VDB",
+  "output_path": "../optimization_runs",
+  "targets": {
+    "context_recall": 0.95,
+    "context_precision": null,
+    "rrf_ndcg": null,
+    "grounding": null,
+    "retrieval_p95_ms": null
+  },
+  "min_improvement": 0.005,
+  "holdout_fraction": 0.34,
+  "holdout_tolerance": 0.02,
+  "repeats": 3,
+  "time_budget_s": 3600,
+  "cost_budget_usd": null,
+  "agent_provider": "ollama",
+  "allow_external_llm": false
+}

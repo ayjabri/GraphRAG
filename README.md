@@ -297,7 +297,8 @@ docs/
 ├── metadata.json        # chunking settings + one entry per document: doc_id, file, title, owner, acl
 ├── documents/*.md       # document text (synthetic banking and Treasury material, all fictional)
 ├── edges.json           # document relationships: source, relationship, target, description
-└── evals.json           # labelled questions: id, query, groups, relevant passages, reference answer
+├── evals.json           # labelled questions: id, query, groups, relevant passages, reference answer
+└── optimize.json        # optimize_rag.py settings: model, targets, budgets, paths, agent provider
 ```
 
 | Document                  | ACL                          | Topic                                         |
@@ -375,13 +376,32 @@ weaknesses and proposes changes; deterministic rules decide whether to accept th
 `GraphRAG` / `EmbeddingGraphRAG`, `calc_metric()`, `evaluate()` / `report()` and the persisted
 indexes, and does not modify `main.py`.
 
+All settings live in one JSON file next to the documents, `docs/optimize.json`; the command line
+only picks the file and the verbosity:
+
 ```bash
-python optimize_rag.py --model graph --max-iterations 5 --recall-target 0.95 --max-p95-latency-ms 500
-python optimize_rag.py --model embedding --precision-target 0.3 --verbose
-python optimize_rag.py --model graph --grounding-target 0.98      # also generates and judges answers (slow)
-python optimize_rag.py --model graph --no-agent                    # rule-based proposals only, no LLM
-python optimize_rag.py -h                                          # all options
+python optimize_rag.py                          # settings from docs/optimize.json
+python optimize_rag.py -c my_settings.json -v   # another settings file, verbose output
 ```
+
+```jsonc
+{
+  "model": "graph",                       // "graph" or "embedding"
+  "max_iterations": 5,                    // candidate experiments, 1-20
+  "docs": ".", "eval_path": "evals.json", // relative to the settings file
+  "index_path": "../VDB",                 // production index, opened read-only
+  "output_path": "../optimization_runs",  // run folders
+  "targets": {"context_recall": 0.95, "context_precision": null, "rrf_ndcg": null,
+              "grounding": null, "retrieval_p95_ms": null},
+  "min_improvement": 0.005, "holdout_fraction": 0.34, "holdout_tolerance": 0.02,
+  "repeats": 3, "time_budget_s": 3600, "cost_budget_usd": null,
+  "agent_provider": "ollama",             // null = rule-based proposals only, no LLM
+  "allow_external_llm": false             // needed for a grounding target with a non-Ollama provider
+}
+```
+
+Missing keys take the defaults in `DEFAULT_CONFIG`; unknown keys or out-of-range values are
+rejected. A `grounding` target also generates and judges answers (slow).
 
 ```
 load_baseline -> evaluate_baseline -> diagnose -> propose -> prepare_index -> evaluate_candidate
@@ -392,12 +412,12 @@ load_baseline -> evaluate_baseline -> diagnose -> propose -> prepare_index -> ev
   `overlap` (rebuild the index); `top_k`, `rrf_k`, `hops`, `hop_chunks`, `bm25_k1`, `bm25_b`,
   `relationships` (edge types the graph walk follows) and `prompt` (reuse it). `prompt` picks a
   name from the human-written `GROUNDING_PROMPTS` in `main.py` and is only tuned when answers are
-  generated (`--grounding-target`). Reranking and the embedding model are reported as not tunable.
+  generated (a `grounding` target). Reranking and the embedding model are reported as not tunable.
 - **Acceptance** needs every gate: no ACL violations, no errors or timeouts, retrieval P95 within
-  the limit, a tuning-score gain of at least `--min-improvement`, and no held-out drop beyond
-  `--holdout-tolerance`. The score weights context recall 0.5, RRF NDCG 0.2, context precision 0.2
+  the limit, a tuning-score gain of at least `min_improvement`, and no held-out drop beyond
+  `holdout_tolerance`. The score weights context recall 0.5, RRF NDCG 0.2, context precision 0.2
   and judge grounding 0.1 (when measured).
-- **Stops** when all targets are met on both sets, after `--max-iterations`, after 2 iterations
+- **Stops** when all targets are met on both sets, after `max_iterations`, after 2 iterations
   without an accepted candidate, when the time or cost budget runs out, or on any ACL violation.
 - **Safeguards**: a third of the questions are held out by a stable hash of their ID and never
   shown to the agent. The agent sees metrics, configurations and question IDs, never question,
