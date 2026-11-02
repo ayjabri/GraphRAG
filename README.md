@@ -267,7 +267,36 @@ python main.py --model traditional                # TraditionalRAG
 python main.py --model ollama                     # host and embed model come from .env
 python main.py --model graph --groups sre finance --query "your question"
 python main.py -h                                 # all options
+python main.py --model graph --eval               # retrieval metrics on EVAL_SET (no LLM)
 ```
+
+## Retrieval evaluation
+
+`calc_metric(query, relevant, groups, k=None)` scores retrieval for one labelled query without
+calling the LLM. `EVAL_SET` in `main.py` is a small, hand-labelled set: each item has a query, the
+user's groups, and the documents a person judged relevant. Only relevant documents those groups may
+read count as the target; retrieved documents they may not read are reported as `leaked`.
+
+| Stage      | Defined in       | Classes          | Metrics                                            |
+| ---------- | ---------------- | ---------------- | -------------------------------------------------- |
+| `dense`    | `TraditionalRAG` | all three        | Precision@K, Recall@K, MRR, NDCG@K, leaks          |
+| `bm25`     | `GraphRAG`       | Graph, Embedding | Precision@K, Recall@K, MRR, NDCG@K, leaks          |
+| `rrf`      | `GraphRAG`       | Graph, Embedding | Precision@K, Recall@K, MRR, NDCG@K, leaks          |
+| `evidence` | `GraphRAG`       | Graph, Embedding | Precision, Recall, leaks (unordered set, no rank metrics) |
+
+Retrieval latency covers `fit()` (plus RRF and the graph walk in `GraphRAG`), never LLM generation.
+`EmbeddingGraphRAG` inherits `GraphRAG.calc_metric()` unchanged; its `dense` stage is the embedding
+ranking. `evaluate(model_cls)` runs the whole set and returns a Polars DataFrame:
+
+```python
+import polars as pl
+from main import evaluate, TraditionalRAG, GraphRAG
+
+scores = pl.concat([evaluate(TraditionalRAG), evaluate(GraphRAG)])
+scores.group_by("model", "stage").agg(pl.col("precision", "recall", "mrr", "ndcg").mean())
+```
+
+`python test_metrics.py` checks the metrics against hand-computed values.
 
 ## Persisted index (`VDB/`)
 
@@ -321,6 +350,7 @@ rankings, ACL results and graph evidence are identical.
 ```
 main.py         # corpus, the three RAG classes, and the CLI
 test_index_persistence.py  # save_index / load_index round-trip test
+test_metrics.py            # calc_metric() checks against hand-computed values
 VDB/            # index written by GraphRAG.save_index() (Parquet, NPZ, JSON)
 pyproject.toml  # packaging, dependencies, ruff config
 .env.example    # template for local settings (copy to .env)
@@ -363,7 +393,7 @@ Known gaps:
 - **Weak citation check.** It verifies that cited IDs exist in the context, not that claims are supported, and its regex ignores IDs containing `-` or `.`.
 - **`GraphRAG` requires `edges`.** Passing `None` raises an error.
 - **Performance.** Document vectors are dense lists over the whole vocabulary, and the graph walk has no context cap. `EmbeddingGraphRAG` still builds TF-IDF document vectors it never uses.
-- **No retrieval evaluation** (e.g. recall@k) to compare the three models.
+- **Tiny evaluation set.** `EVAL_SET` has six queries; on this corpus BM25 and TF-IDF produce the same rankings, so their metrics match.
 
 ## License
 
