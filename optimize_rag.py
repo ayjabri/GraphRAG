@@ -238,6 +238,7 @@ class RAGOptimizer:
         self.relationship_types = sorted({relationship for _, relationship, _ in self.corpus["edges"]})
         self.index_dirs = {}  # index key -> folder holding that index
         self.agent_calls = []  # one entry per agent LLM call: node, seconds, tokens, cost
+        self.graph = self.build_graph()  # compiled LangGraph; view with self.graph.get_graph().draw_mermaid()
 
     # ------------------------------------------------------------ configuration
 
@@ -917,9 +918,8 @@ class RAGOptimizer:
         return graph.compile()
 
     def run(self):
-        """Run the optimization loop; return the final LangGraph state."""
-        app = self.build_graph()
-        return app.invoke({}, config={"recursion_limit": 20 + 8 * self.max_iterations})
+        """Run the optimization loop (self.graph); return the final LangGraph state."""
+        return self.graph.invoke({}, config={"recursion_limit": 20 + 8 * self.max_iterations})
 
     # ------------------------------------------------------------ reporting
 
